@@ -25,9 +25,6 @@ def _csv_path() -> str:
 
 
 def _save_csv(rows: List[Dict], path: str) -> None:
-    if not rows:
-        print("⚠️ 수집 결과가 비어있습니다.")
-        return
     cols = [
         "date_kst",
         "rank",
@@ -52,7 +49,13 @@ def _save_csv(rows: List[Dict], path: str) -> None:
 async def run():
     print("🔎 올리브영 글로벌몰 베스트 셀러 수집 시작")
     items = await scrape_oliveyoung_global()
-    # 1~100위가 아니면 정렬/재랭크 보정
+
+    # 결과 비면 슬랙 전송/CSV 저장 모두 건너뜀
+    if not items:
+        print("⚠️ 수집 결과가 비어있습니다.")
+        return
+
+    # 랭킹 정렬/보정
     items = sorted(items, key=lambda x: x.get("rank", 10**9))
     for i, it in enumerate(items, 1):
         it["rank"] = i
