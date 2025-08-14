@@ -43,9 +43,9 @@ def _clean_spaces(s: str) -> str:
 
 def _clean_brand_value(brand: str, product_name: str) -> str:
     """
-    brand 칸에 상품명이 섞여 들어오는 문제 정리:
-    - 여러 줄로 들어오면 '첫 번째 비어있지 않은 줄'만 사용
-    - product_name이 섞여 있으면 제거
+    brand 칸 정리:
+    - 여러 줄이면 첫 번째 비어있지 않은 줄만 사용
+    - product_name 섞여 있으면 제거
     - 공백/개행 정리
     """
     if brand is None:
@@ -61,7 +61,7 @@ def _clean_brand_value(brand: str, product_name: str) -> str:
             break
     text = first_non_empty or text.strip()
 
-    # 2) product_name이 포함되어 있으면 제거(공백 정규화 후 대소문자 무시)
+    # 2) product_name이 포함되어 있으면 제거
     if isinstance(product_name, str) and product_name:
         pn = re.sub(r"\s+", " ", product_name).strip()
         tt = re.sub(r"\s+", " ", text).strip()
@@ -77,15 +77,30 @@ def _clean_brand_value(brand: str, product_name: str) -> str:
 
 async def _ensure_top_orders_only(page: Page) -> None:
     """
-    'Top Orders / Best Sellers' 영역이 다 로드되도록 스크롤.
+    첫 로딩 안정화 + Top Orders 로드 유도 스크롤.
     'What's trending in Korea?' 헤더가 보이면 그 지점까지만 로드했다고 판단.
     """
-    # 페이지에 첫 카드 뜰 때까지
-    await page.wait_for_selector("a[href*='product']")
+    # 초기 로드 안정화
+    await page.wait_for_load_state("domcontentloaded")
+    # 네트워크가 잠잠해질 때 한 번 더 대기 (간헐적 레이지 로드 대응)
+    try:
+        await page.wait_for_load_state("networkidle", timeout=15000)
+    except Exception:
+        pass
 
-    # 스크롤로 카드 로드
+    # 요소가 DOM에 붙기만 하면 통과(visibility 요구 X)
+    try:
+        await page.wait_for_selector("a[href*='product']", state="attached", timeout=60000)
+    except Exception:
+        # 그래도 실패하면 스크롤을 조금 내려보며 재시도
+        for _ in range(5):
+            await page.evaluate("window.scrollBy(0, 800)")
+            await page.wait_for_timeout(500)
+            if await page.locator("a[href*='product']").count():
+                break
+
+    # 스크롤로 Top Orders 영역 로드
     for _ in range(40):
-        # 'What's trending in Korea?' 섹션이 보이면 종료
         trending = page.locator("text=/what\\'s trending in korea\\?/i")
         if await trending.first.is_visible():
             break
@@ -98,7 +113,7 @@ async def _extract_cards_in_top_orders(page: Page):
     Top Orders(=Best Sellers) 그리드 내 카드 컨테이너들을 반환
     - 'What's trending in Korea?' 이전 영역의 카드만 수집
     """
-    # Top Orders/Best Sellers 헤더 기준으로 영역 잡기(다양한 DOM 대응)
+    # Top Orders/Best Sellers 헤더 기준으로 영역 잡기
     top_area = None
     for sel in [
         "section:has(h2:has-text('Top Orders'))",
@@ -111,9 +126,8 @@ async def _extract_cards_in_top_orders(page: Page):
             top_area = loc.first
             break
 
-    # 못 찾으면 화면 상단부터 트렌딩 헤더 전까지를 사용
+    # 못 찾으면 화면 상단부터 트렌딩 헤더 전까지 사용
     if not top_area:
-        # 트렌딩 헤더의 y 좌표
         trending = page.locator("text=/what\\'s trending in korea\\?/i")
         trending_top = await trending.bounding_box()
         cutoff_y = trending_top["y"] if trending_top else math.inf
@@ -138,11 +152,10 @@ async def _card_to_item(card, rank: int) -> Dict:
     """개별 카드에서 필요한 정보 추출"""
     # 브랜드/상품명
     brand_txt = await card.locator("text").first.inner_text()
-    # 브랜드/상품명을 개별 영역에서 잡으려 시도
     brand = ""
     name = ""
 
-    # 1) 흔한 구조: 브랜드/상품명 각각 엘리먼트가 있음
+    # 1) 자주 쓰는 구조
     for b_sel in [".brand", ".prd_brand", "strong.brand", "span.brand"]:
         if await card.locator(b_sel).count():
             brand = await card.locator(b_sel).first.inner_text()
@@ -152,7 +165,7 @@ async def _card_to_item(card, rank: int) -> Dict:
             name = await card.locator(n_sel).first.inner_text()
             break
 
-    # 2) 그래도 못 잡았으면 카드 전체 텍스트에서 첫 줄/둘째 줄 추론
+    # 2) 보조 추론
     if not brand or not name:
         lines = [ln.strip() for ln in brand_txt.splitlines() if ln.strip()]
         if not brand and lines:
@@ -163,14 +176,13 @@ async def _card_to_item(card, rank: int) -> Dict:
     brand = _clean_spaces(brand)
     name = _clean_spaces(name)
 
-    # 현재가, 원가, 밸류(적립) 가격
+    # 현재가/원가/밸류
     whole_text = await card.inner_text()
     # Value: US$xx.xx
     value_price_usd = _parse_price_usd(re.search(r"Value[:：]\s*US\$ ?[0-9,\.]+", whole_text, flags=re.I).group(0)) \
         if re.search(r"Value[:：]\s*US\$ ?[0-9,\.]+", whole_text, flags=re.I) else float("nan")
     has_value_price = not math.isnan(value_price_usd)
 
-    # 취소선/원가 후보
     orig = float("nan")
     for o_sel in ["s:has-text('US$')", "del:has-text('US$')"]:
         if await card.locator(o_sel).count():
@@ -181,9 +193,7 @@ async def _card_to_item(card, rank: int) -> Dict:
             except Exception:
                 pass
 
-    # 현재가 후보
     cur = float("nan")
-    # 가격 텍스트만 있는 요소를 우선
     price_node = None
     for p_sel in [
         "strong:has-text('US$')", ".price:has-text('US$')",
@@ -195,16 +205,14 @@ async def _card_to_item(card, rank: int) -> Dict:
     if price_node:
         cur = _parse_price_usd(await price_node.inner_text())
 
-    # 그래도 못 잡으면 카드 전체에서 금액 2개 이상 뽑아 추정
+    # 카드 전체 텍스트에서 금액 추정
     if math.isnan(cur):
         prices = re.findall(r"US\$ ?([0-9][0-9,]*\.?[0-9]*)", whole_text)
         if prices:
-            # 보통 현재가가 더 진하게/하단에 노출되므로 마지막 값을 현재가로 사용
             cur = float(prices[-1].replace(",", ""))
             if len(prices) >= 2 and math.isnan(orig):
                 orig = float(prices[-2].replace(",", ""))
 
-    # Value 가격을 원가로 대체(광고성 밸류 값이 있을 때)
     price_original = orig
     if has_value_price and not math.isnan(value_price_usd):
         price_original = value_price_usd
@@ -229,7 +237,6 @@ async def _card_to_item(card, rank: int) -> Dict:
             image_url = await card.locator(img_sel).first.get_attribute("src") or ""
             break
 
-    # 브랜드 칸 정규화(여기서는 name 참고만, 본 확정은 DataFrame에서 한 번 더 수행)
     brand = _clean_brand_value(brand, name)
 
     return {
@@ -270,7 +277,6 @@ async def scrape_oliveyoung_global() -> List[Dict]:
                 items.append(item)
                 rank += 1
             except Exception:
-                # 카드 단위 에러는 스킵
                 continue
 
         await ctx.close()
@@ -291,7 +297,6 @@ def save_items_to_csv(items: List[Dict]) -> str:
             axis=1,
         )
 
-    # 열 순서 정리(샘플과 동일)
     cols = [
         "date_kst", "rank", "brand", "product_name",
         "price_current_usd", "price_original_usd", "discount_rate_pct",
