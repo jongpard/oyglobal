@@ -86,12 +86,11 @@ async def _scroll_to_load(page, target_count=100, step_px=1600, max_rounds=18):
             except Exception:
                 pass
         if count >= target_count: break
-        if count == last_count:  # 더이상 증가 없으면 종료
+        if count == last_count:
             break
         last_count = count
 
 def _text_from_attrs(tag) -> str:
-    # aria-label, title, data-name 등 속성 기반 대체
     for attr in ["aria-label", "title", "data-name", "data-goods-nm", "data-product-name"]:
         if tag and tag.has_attr(attr) and tag[attr].strip():
             return tag[attr].strip()
@@ -108,7 +107,6 @@ def _extract_text(el, selectors: List[str]) -> str:
                 txt = target["alt"].strip()
             if txt:
                 return txt
-    # fallback: 카드 전체 텍스트에서 줄바꿈 기준 가장 긴 라인
     raw = el.get_text("\n", strip=True)
     if raw:
         parts = [p.strip() for p in raw.split("\n") if p.strip()]
@@ -116,9 +114,6 @@ def _extract_text(el, selectors: List[str]) -> str:
         return parts[0] if parts else ""
     return ""
 
-_DETAIL_PATHS = [
-    "/product/detail", "/goods/detail", "/product/", "/goods/"
-]
 _DETAIL_RE = re.compile(r"""['"](?P<url>/(?:product|goods)[^'"]+)['"]""")
 
 def _normalize_href(href: str) -> str:
@@ -131,27 +126,22 @@ def _normalize_href(href: str) -> str:
     return href
 
 def _extract_link(el, selectors: List[str]) -> str:
-    # 1) 일반 href
     for sel in selectors:
         tag = el.select_one(sel)
         if tag and tag.has_attr("href"):
             href = tag["href"].strip()
             if "javascript:void" not in href:
                 return _normalize_href(href)
-            # javascript:void(0) 인 경우 data-url, data-href 확인
             for a in ["data-url", "data-href", "data-link", "data-detail-url"]:
                 if tag.has_attr(a) and tag[a]:
                     return _normalize_href(tag[a])
-            # onclick 속성에서 detail 경로 추출
             if tag.has_attr("onclick"):
                 m = _DETAIL_RE.search(tag["onclick"])
                 if m:
                     return _normalize_href(m.group("url"))
-    # 2) 카드 루트에서 data-* 속성
     for a in ["data-url", "data-href", "data-link", "data-detail-url", "data-product-url"]:
         if el.has_attr(a) and el[a]:
             return _normalize_href(el[a])
-    # 3) 상품번호로 추정하여 구성
     for a in ["data-product-id", "data-goods-no", "data-ref-goodsno", "data-prd-no"]:
         if el.has_attr(a) and el[a]:
             return _normalize_href(f"/product/detail?prdNo={el[a]}")
@@ -254,7 +244,6 @@ def _harvest_from_json(payloads: List[Dict[str, Any]]) -> Optional[pd.DataFrame]
                 url = prod.get("url") or prod.get("linkUrl") or prod.get("detailUrl") or ""
                 if url and url.startswith("/"):
                     url = "https://global.oliveyoung.com" + url
-                # 가격
                 sale = None
                 original = None
                 for key in ["salePrice", "price", "saleAmt", "finalPrice", "goodsPrice"]:
@@ -290,6 +279,21 @@ async def _wait_dom_ready(page, url: str):
     await _soft_wait_networkidle(page, 3000)
     await _wait_for_any_selector(page, PRODUCT_CARD_SELECTORS, total_timeout_ms=15000)
 
+async def _route_block(route):
+    try:
+        url = route.request.url
+        if any(url.endswith(ext) for ext in (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".woff", ".woff2", ".ttf")):
+            return await route.abort()
+        res_type = route.request.resource_type
+        if res_type in ("image", "font", "media"):
+            return await route.abort()
+        return await route.continue_()
+    except Exception:
+        try:
+            await route.continue_()
+        except Exception:
+            pass
+
 async def _scrape_impl(debug=False) -> pd.DataFrame:
     _ensure_debug_dirs()
     async with async_playwright() as p:
@@ -307,43 +311,32 @@ async def _scrape_impl(debug=False) -> pd.DataFrame:
             timezone_id="Asia/Seoul",
         )
 
-        # 속도 향상: 이미지/폰트/스타일시트 차단
         await context.route("**/*", lambda route: asyncio.create_task(_route_block(route)))
-
         page = await context.new_page()
 
-        # XHR 수집
+        # XHR 수집기
         json_payloads: List[Dict[str, Any]] = []
         def is_best_url(u: str) -> bool:
             u = u.lower()
             return ("best" in u and ("seller" in u or "list" in u))
-
         page.on("response", lambda resp: asyncio.create_task(_collect_json(resp, json_payloads, is_best_url)))
 
-        # 진입
+        # 진입 & 카드 대기
         await _wait_dom_ready(page, BEST_URL)
 
-        # 빠른 XHR 대기(있으면 바로 사용)
-        try:
-            resp = await page.wait_for_response(
-                lambda r: is_best_url(r.url) and "application/json" in (r.headers.get("content-type") or ""),
-                timeout=6000
-            )
-            try:
-                data = await resp.json()
-                json_payloads.append({"url": resp.url, "data": data})
-            except Exception:
-                pass
-        except PWTimeout:
-            pass
+        # 👉 문제 지점 수정: wait_for_response 완전 제거
+        #    이벤트 수집으로 충분 + 짧게 숨 고르기
+        await asyncio.sleep(2.0)
 
-        # 스크롤 최소화(필요할 때만)
+        # 스크롤 최소화
         await _scroll_to_load(page, target_count=100, max_rounds=12)
 
+        # DOM / XHR 파싱
         html = await page.content()
         df_dom = await _harvest_from_dom(html)
         df_json = _harvest_from_json(json_payloads)
 
+        # 안전 종료
         await context.close()
         await browser.close()
 
@@ -372,21 +365,6 @@ async def _scrape_impl(debug=False) -> pd.DataFrame:
                 if c in df.columns:
                     df[c] = df[c].fillna("").astype(str)
         return df
-
-async def _route_block(route):
-    try:
-        url = route.request.url
-        if any(url.endswith(ext) for ext in (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".woff", ".woff2", ".ttf")):
-            return await route.abort()
-        res_type = route.request.resource_type
-        if res_type in ("image", "font", "media"):
-            return await route.abort()
-        return await route.continue_()
-    except Exception:
-        try:
-            await route.continue_()
-        except Exception:
-            pass
 
 def scrape_oy_global_us(debug=False) -> pd.DataFrame:
     return asyncio.run(_scrape_impl(debug=debug))
