@@ -14,7 +14,7 @@ from playwright.async_api import async_playwright, Page, Locator
 # -------------------------------------------------
 BASE_URL = "https://global.oliveyoung.com/"
 
-# 페이지 내 섹션 제목(h2/h3) 중 다음 정규식과 매칭되는 섹션만 사용
+# 페이지 내 섹션 제목(h2/h3/tabs) 중 다음 정규식과 매칭되는 섹션만 사용
 SECTION_TITLE_RE = re.compile(r"(Top Orders|Best Sellers)", re.I)
 
 # 실제 상품 카드 앵커 (배너/광고가 아닌 상품 상세로 가는 링크만)
@@ -58,23 +58,68 @@ def _abs_url(href: Optional[str]) -> Optional[str]:
 
 
 # -------------------------------------------------
-# 섹션/카드 수집
+# 섹션/탭 활성화 & 카드 수집
 # -------------------------------------------------
+async def _activate_top_orders_tab(page: Page) -> None:
+    """
+    탭 UI일 경우 'Top Orders' / 'Best Sellers' 탭을 클릭해서 활성화한다.
+    실패해도 무시(섹션이 바로 보이는 레이아웃일 수 있음).
+    """
+    try:
+        # 탭 후보: tab-swiper-title, tab, button 등
+        tab_candidates = page.locator(
+            ".tab-swiper-title, .tab, button, [role='tab']"
+        ).filter(has_text=SECTION_TITLE_RE)
+        if await tab_candidates.count() > 0:
+            tab = tab_candidates.first
+            # attached 상태만 보장하고 클릭 시도
+            await tab.wait_for(state="attached", timeout=10000)
+            await tab.click(timeout=10000)
+            # 탭 콘텐츠 렌더링 여유
+            await page.wait_for_timeout(500)
+    except Exception:
+        pass
+
+
 async def _get_section_locator(page: Page, title_re: re.Pattern) -> Locator:
     """
     페이지에서 h2/h3 텍스트가 title_re와 매칭되는 섹션(또는 가장 가까운 상위 컨테이너)을 반환.
+    - visible을 기다리지 않고 attached로만 대기
+    - 실패 시 텍스트 검색으로 폴백
     """
-    await page.wait_for_selector("h2, h3", timeout=30000)
+    # 우선 탭을 활성화(있으면)
+    await _activate_top_orders_tab(page)
+
+    # 헤더들을 attached 기준으로 대기
+    await page.wait_for_selector("h2, h3", state="attached", timeout=40000)
     headings = page.locator("h2, h3")
     count = await headings.count()
+
     for i in range(count):
         h = headings.nth(i)
-        await h.wait_for(state="visible", timeout=30000)  # ✅ 괄호 호출 금지
-        txt = (await h.inner_text()).strip()
+        # visible을 강제하지 않고 텍스트만 확보
+        txt = ""
+        try:
+            txt = (await h.inner_text()).strip()
+        except Exception:
+            continue
+        if not txt:
+            continue
         if title_re.search(txt):
             # 가장 가까운 section/div 조상을 섹션으로 잡아 스코프 한정
             section = h.locator("xpath=ancestor::*[self::section or self::div][1]")
             return section
+
+    # 폴백: 아무 헤딩도 못 잡았으면 페이지 텍스트 매칭 시도
+    try:
+        any_text = page.get_by_text(title_re)
+        if await any_text.count() > 0:
+            h = any_text.first
+            section = h.locator("xpath=ancestor::*[self::section or self::div][1]")
+            return section
+    except Exception:
+        pass
+
     raise RuntimeError("Top Orders/Best Sellers 섹션을 찾을 수 없습니다.")
 
 
@@ -86,18 +131,19 @@ async def _extract_cards_in_top_orders(page: Page) -> Locator:
     cards = section.locator(CARD_ANCHOR)
     # 첫 카드가 붙을 때까지 대기 (가시성보단 attached가 안전)
     await cards.first.wait_for(state="attached", timeout=30000)
-    return cards
+    return cards, section
 
 
 async def _autoscroll_section(page: Page, section: Locator, target_count: int = 100) -> None:
     """
     섹션 내부를 부드럽게 스크롤해서 lazy-load된 카드가 충분히 로드되도록 함.
     """
-    # 섹션의 스크롤 가능한 가장 가까운 조상(혹은 페이지)을 찾아서 스크롤
     container = section
     try:
         # 섹션 내부 스크롤 우선
-        scroll_box = section.locator("xpath=ancestor-or-self::*[contains(@style,'overflow') or contains(@class,'scroll')][1]")
+        scroll_box = section.locator(
+            "xpath=ancestor-or-self::*[contains(@style,'overflow') or contains(@class,'scroll')][1]"
+        )
         if await scroll_box.count() > 0:
             container = scroll_box.first
     except Exception:
@@ -117,7 +163,9 @@ async def _autoscroll_section(page: Page, section: Locator, target_count: int = 
 
         # 스크롤
         try:
-            await container.evaluate("(el) => el.scrollTo({top: el.scrollHeight, behavior: 'smooth'})")
+            await container.evaluate(
+                "(el) => el.scrollTo({top: el.scrollHeight, behavior: 'smooth'})"
+            )
         except Exception:
             # 섹션 스크롤이 안 되면 전체 페이지 스크롤
             await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
@@ -163,14 +211,11 @@ def _parse_prices_from_text(text: str) -> Dict[str, Optional[float]]:
         # 원가 후보들 (현재가보다 큰 값)
         bigger = sorted([x for x in numbers if x > current])
         if value_price is not None and value_price in bigger:
-            # value 값이 있으면 원가가 value와 동일할 수도 있지만,
-            # 일부 카드에서 value는 '구성 총액'이므로 원가로 쓰지 않음.
-            # 원가 후보에서 value를 제거한 뒤 가장 작은 값을 선택
+            # value는 구성 총액일 수 있어 우선 제외
             bigger_wo_value = [x for x in bigger if x != value_price]
             if bigger_wo_value:
                 original = bigger_wo_value[0]
             else:
-                # 대안이 없으면 value를 원가로 사용
                 original = value_price
         else:
             if bigger:
@@ -196,7 +241,6 @@ async def _extract_name_and_brand(card: Locator) -> Dict[str, str]:
     brand = ""
     name = ""
 
-    # 전용/유사 셀렉터 (사이트 구조가 바뀌어도 최대한 커버)
     brand_candidates = [
         "[class*='brand']",
         ".brand",
@@ -239,7 +283,6 @@ async def _extract_name_and_brand(card: Locator) -> Dict[str, str]:
         try:
             t = (await card.inner_text()).strip()
             lines = [l.strip() for l in t.splitlines() if l.strip()]
-            # 앞 라인에 브랜드, 그 다음 라인에 상품명이 오는 구조가 대부분
             if not brand and len(lines) >= 2:
                 brand = lines[0]
             if not name:
@@ -250,7 +293,6 @@ async def _extract_name_and_brand(card: Locator) -> Dict[str, str]:
         except Exception:
             pass
 
-    # 혹시 브랜드에 상품명이 딸려온 경우 간단 정리 (브랜드가 너무 길면 비워서 잘못된 값 저장하지 않도록)
     if brand and len(brand) > 60:
         brand = ""
 
@@ -258,7 +300,6 @@ async def _extract_name_and_brand(card: Locator) -> Dict[str, str]:
 
 
 async def _extract_image(card: Locator) -> Optional[str]:
-    # 이미지 src 또는 data-src
     try:
         img = card.locator("img").first
         if await img.count() == 0:
@@ -292,10 +333,14 @@ async def scrape_oliveyoung_global() -> List[Dict]:
         )
         page = await context.new_page()
         await page.goto(BASE_URL, wait_until="domcontentloaded", timeout=60000)
+        # 안정 대기
+        try:
+            await page.wait_for_load_state("networkidle", timeout=15000)
+        except Exception:
+            pass
 
         # Top Orders 섹션 카드 추출
-        cards = await _extract_cards_in_top_orders(page)
-        section = await _get_section_locator(page, SECTION_TITLE_RE)
+        cards, section = await _extract_cards_in_top_orders(page)
 
         # 필요시 섹션 오토스크롤
         await _autoscroll_section(page, section, target_count=100)
