@@ -1,8 +1,10 @@
 import re
 from typing import Dict, Optional
 
-USD_RE = re.compile(r"US?\$\s*([0-9]+(?:\.[0-9]{1,2})?)", re.I)
-VALUE_RE = re.compile(r"value\s*[:：]\s*US?\$\s*([0-9]+(?:\.[0-9]{1,2})?)", re.I)
+# US$가 CSS로 붙는 경우를 대비해, 통화기호가 없어도 "두 자리 소수" 패턴을 가격으로 인식
+# 예: "18.75", "31.50" 등. (1+1, 80 같은 숫자는 배제됨)
+AMOUNT_RE = re.compile(r"(?:US?\$)?\s*([0-9]+(?:\.[0-9]{2}))", re.I)
+VALUE_RE = re.compile(r"value\s*[:：]?\s*(?:US?\$)?\s*([0-9]+(?:\.[0-9]{2}))", re.I)
 
 def _to_float(s: str) -> Optional[float]:
     if not s:
@@ -12,41 +14,40 @@ def _to_float(s: str) -> Optional[float]:
     except:
         return None
 
-def _find_all_usd(text: str):
-    return [float(m.group(1)) for m in USD_RE.finditer(text)]
+def _find_all_amounts(text: str):
+    return [float(m.group(1)) for m in AMOUNT_RE.finditer(text)]
 
 def parse_prices_and_discount(price_block_text: str) -> Dict:
     """
     규칙:
-      - 정가/할인가가 함께 있으면 둘 다 사용
-      - 가격이 하나만 있으면 할인 없음(정가=현재가)
-      - "Value: US$86" 존재 시 정가=Value, 현재가=첫 번째 USD
+      - 'Value'가 보이면 정가=Value, 현재가=첫 번째 금액
+      - 정가/할인가 2개 이상 보이면 min=현재가, max=정가
+      - 하나만 보이면 할인 없음(정가=현재가)
     """
-    raw = price_block_text.replace("\n", " ")
+    raw = (price_block_text or "").replace("\n", " ")
 
     value_match = VALUE_RE.search(raw)
     value_price = _to_float(value_match.group(1)) if value_match else None
 
-    usd_vals = _find_all_usd(raw)
+    amounts = _find_all_amounts(raw)
 
     price_current = None
     price_original = None
 
     if value_price is not None:
-        if usd_vals:
-            price_current = usd_vals[0]
+        if amounts:
+            price_current = amounts[0]
             price_original = value_price
         else:
             price_current = None
             price_original = value_price
     else:
-        if len(usd_vals) >= 2:
-            # 다양한 마크업을 고려해 휴리스틱 적용:
-            price_current = min(usd_vals)
-            price_original = max(usd_vals)
-        elif len(usd_vals) == 1:
-            price_current = usd_vals[0]
-            price_original = usd_vals[0]
+        if len(amounts) >= 2:
+            price_current = min(amounts)
+            price_original = max(amounts)
+        elif len(amounts) == 1:
+            price_current = amounts[0]
+            price_original = amounts[0]
         else:
             price_current = None
             price_original = None
