@@ -24,7 +24,6 @@ def main():
         if webhook:
             post_slack_message(webhook, blocks, fallback_text=text)
 
-        # Google Drive 업로드
         folder = os.getenv("GDRIVE_FOLDER_ID", "").strip()
         cid = os.getenv("GOOGLE_CLIENT_ID", "").strip()
         csecret = os.getenv("GOOGLE_CLIENT_SECRET", "").strip()
