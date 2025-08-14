@@ -9,87 +9,109 @@ BEST_URL = "https://global.oliveyoung.com/display/page/best-seller?target=pillsT
 
 JS_EXTRACT = r"""
 () => {
-  // 헬퍼
   const asNum = (s) => {
     if (!s) return null;
     const m = String(s).match(/([\d,]+(?:\.\d{2})?)/);
     if (!m) return null;
     return parseFloat(m[1].replace(/,/g, ""));
   };
+  const inRange = (v) => typeof v === "number" && v >= 0.5 && v <= 500;
 
-  // 트렌딩 섹션 y-range 찾기
+  // 트렌딩 섹션 y-range
   let trendTop = -Infinity, trendBottom = -Infinity;
-  const all = Array.from(document.querySelectorAll("body *"));
-  const trendNode = all.find(el => /what.?s trending in korea/i.test(el.textContent || ""));
+  const allNodes = Array.from(document.querySelectorAll("body *"));
+  const trendNode = allNodes.find(el => /what.?s trending in korea/i.test(el.textContent || ""));
   if (trendNode) {
     const box = (trendNode.closest("section,div,article") || trendNode).getBoundingClientRect();
     trendTop = box.top + window.scrollY;
     trendBottom = box.bottom + window.scrollY;
   }
 
-  // 베스트 카드 = 상품 상세로 가는 링크가 있는 가장 가까운 카드
+  // 상세 링크 모으기
   const anchors = Array.from(document.querySelectorAll("a[href*='product/detail']"));
   const seen = new Set();
-  const rows = [];
+  const candidates = [];
 
   for (const a of anchors) {
-    const href = a.href || a.getAttribute("href") || "";
+    const href = a.getAttribute("href") || "";
     if (!href) continue;
     const abs = href.startsWith("http") ? href : (location.origin + href);
     if (seen.has(abs)) continue;
 
-    const card = a.closest("li, article, .item, .unit, .prd_info, .product, .prod, .box") || a;
+    const card = a.closest("li, article, .item, .unit, .prd_info, .product, .prod, .box, .list, .list_item") || a;
     const rect = card.getBoundingClientRect();
     const yAbs = rect.top + window.scrollY;
 
-    // 트렌딩 구간 제외
+    // 트렌딩 제외
     if (trendTop > -Infinity && yAbs >= trendTop && yAbs <= trendBottom) continue;
 
     // 브랜드
     let brand = "";
     const brandEl = card.querySelector('[class*="brand" i], strong.brand');
-    if (brandEl) brand = brandEl.textContent.trim();
+    if (brandEl) brand = (brandEl.textContent || "").trim();
 
-    // 상품명: a의 title/aria-label/텍스트 순
-    let name = a.getAttribute("title") || a.getAttribute("aria-label") || a.textContent || "";
-    name = name.replace(/\s+/g, " ").trim();
+    // 상품명(우선순위: a title/aria → 명칭 셀렉터 → img alt → a 텍스트)
+    let name = a.getAttribute("title") || a.getAttribute("aria-label") || "";
     if (!name || name.length < 3) {
       const nameEl = card.querySelector("p.name, .name, .prd_name, .product-name, strong.name");
-      if (nameEl) name = (nameEl.textContent || "").replace(/\s+/g, " ").trim();
+      if (nameEl) name = (nameEl.textContent || "");
     }
+    if (!name || name.length < 3) {
+      const imgAlt = card.querySelector("img[alt]");
+      if (imgAlt) name = imgAlt.getAttribute("alt") || "";
+    }
+    if (!name || name.length < 3) {
+      name = a.textContent || "";
+    }
+    name = name.replace(/\s+/g, " ").trim();
+    if (!name) name = "상품";
 
     // 이미지
     let img = "";
     const imgEl = card.querySelector("img");
     if (imgEl) img = imgEl.src || imgEl.getAttribute("src") || "";
 
-    // 가격: 카드의 '보이는 텍스트'만 사용
-    const visible = (card.innerText || "").replace(/\s+/g, " ");
-    const allDollar = Array.from(visible.matchAll(/US\$ ?([\d,]+(?:\.\d{2})?)/g)).map(m => asNum(m[0]));
-    // Value: US$xx.xx → 정가로 취급
-    const vm = visible.match(/value\s*[:：]?\s*US\$ ?([\d,]+(?:\.\d{2})?)/i);
-    const valuePrice = vm ? asNum(vm[0]) : null;
+    // ----- 가격 추출 -----
+    // 1) price 라는 단어가 class/id에 포함된 요소들을 먼저 긁기
+    const priceBlocks = Array.from(card.querySelectorAll(
+      '[class*="price" i], [id*="price" i], [aria-label*="$" i], [aria-label*="US$" i]'
+    ));
+    let priceText = priceBlocks.map(el => (el.innerText || "").replace(/\s+/g," ")).join(" ").trim();
 
-    let priceCur = null, priceOri = null;
-    if (allDollar.length >= 1) {
-      // 일반: 가장 작은 값 = 현재가
-      priceCur = Math.min(...allDollar);
-      if (valuePrice != null) {
-        priceOri = valuePrice;
-      } else if (allDollar.length >= 2) {
-        priceOri = Math.max(...allDollar);
-      } else {
-        priceOri = priceCur;
-      }
+    // 2) 보조: price 영역이 비어있으면 카드 전체 텍스트 사용
+    if (!priceText) priceText = (card.innerText || "").replace(/\s+/g," ");
+
+    const dollars = [];
+    // US$xx.xx / US$xx  모두 수집
+    for (const m of priceText.matchAll(/US\$ ?([\d,]+(?:\.\d{2})?)/gi)) {
+      dollars.push(asNum(m[0]));
+    }
+    // 소수 둘째자리 가격(기호 없는 케이스)
+    for (const m of priceText.matchAll(/\b([\d,]+\.\d{2})\b/g)) {
+      dollars.push(asNum(m[0]));
+    }
+    // 정수만 있는 가격도 (뒤에 .00 붙는 표시일 수 있어서)
+    for (const m of priceText.matchAll(/\b(\d{1,3}(?:,\d{3})*)\b/g)) {
+      const v = asNum(m[0]);
+      if (v != null && Number.isInteger(v) && v >= 1 && v <= 500) dollars.push(v);
     }
 
-    // 금액 sanity 체크(0.5~500달러만)
-    const ok = (v) => typeof v === "number" && v >= 0.5 && v <= 500;
-    if (!ok(priceCur)) continue;
-    if (!ok(priceOri)) priceOri = priceCur;
+    // Value: US$xx.xx → 정가 힌트
+    let valuePrice = null;
+    const vm = priceText.match(/(?<![A-Za-z0-9_])value(?!\s*=)\s*[:：]?\s*US\$ ?([\d,]+(?:\.\d{2})?)/i);
+    if (vm) valuePrice = asNum(vm[0]);
 
-    seen.add(abs);
-    rows.push({
+    // 범위 필터
+    const clean = dollars.filter(inRange);
+    if (clean.length === 0) continue;
+
+    // 현재가/정가 결정
+    const priceCur = Math.min(...clean);
+    const priceOri = valuePrice && inRange(valuePrice)
+      ? valuePrice
+      : (clean.length >= 2 ? Math.max(...clean) : priceCur);
+
+    candidates.push({
       y: yAbs,
       brand: brand || null,
       product_name: name || "상품",
@@ -98,15 +120,20 @@ JS_EXTRACT = r"""
       product_url: abs,
       image_url: img || null,
     });
+    seen.add(abs);
   }
 
-  // y(위->아래) 정렬, 100개 제한
-  rows.sort((a, b) => a.y - b.y);
-  const out = rows.slice(0, 100).map((r, idx) => ({
-    rank: idx + 1,
-    ...r
-  }));
-  return out;
+  // 위→아래 정렬 후 100개 제한
+  candidates.sort((a, b) => a.y - b.y);
+  const items = candidates.slice(0, 100).map((r, i) => ({ rank: i + 1, ...r }));
+  return {
+    anchorCount: anchors.length,
+    candidateCount: candidates.length,
+    picked: items.length,
+    trendTop,
+    trendBottom,
+    items
+  };
 }
 """
 
@@ -123,33 +150,36 @@ async def scrape_oliveyoung_global() -> List[Dict]:
         await page.goto(BEST_URL, wait_until="domcontentloaded", timeout=90000)
         await page.wait_for_load_state("networkidle")
 
-        # 끝까지 스크롤(보이는대로 수집)
+        # 지연로딩 대비: 스크롤을 안정될 때까지 반복
         prev = -1
         same = 0
-        for i in range(35):
-            await page.mouse.wheel(0, 3000)
-            await asyncio.sleep(0.6)
+        for i in range(40):
+            await page.mouse.wheel(0, 3200)
+            await asyncio.sleep(0.7)
             cnt = await page.locator("a[href*='product/detail']").count()
             if cnt == prev:
                 same += 1
             else:
                 same = 0
             prev = cnt
-            if i > 12 and same >= 3:
+            if i >= 14 and same >= 3:
                 break
 
-        # 페이지 안에서 한 번에 추출
-        rows = await page.evaluate(JS_EXTRACT)
-
+        # 페이지 내부에서 한 번에 추출 (디버그 카운트 포함)
+        res = await page.evaluate(JS_EXTRACT)
         await context.close()
 
-    # 파이썬 측에서 마무리(날짜 붙이고 필드 순서 정리)
+    print(f"🔎 앵커 수: {res.get('anchorCount')}, 후보 카드: {res.get('candidateCount')}, 최종 채택: {res.get('picked')}")
+    tt, tb = res.get("trendTop"), res.get("trendBottom")
+    if tt not in (None, float("inf")) and tb not in (None, float("-inf")):
+        print(f"🧭 트렌딩 y=({tt:.1f}~{tb:.1f})")
+
+    rows: List[Dict] = res.get("items", [])
+    # 파이썬 쪽 후처리(날짜/할인율/플래그)
     for r in rows:
         r["date_kst"] = kst_today_str()
-        # 할인율
         cur, ori = r["price_current_usd"], r["price_original_usd"]
         r["discount_rate_pct"] = round((1 - cur / ori) * 100, 2) if ori and ori > 0 else 0.0
-        r["has_value_price"] = False  # (글로벌몰은 Value 문구만 정가 힌트로 쓰고 별도 저장 X)
+        r["has_value_price"] = False
 
-    # CSV 저장/리턴은 main.py가 처리
     return rows
