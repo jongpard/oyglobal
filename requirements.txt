@@ -1,12 +1,7 @@
 playwright==1.46.0
 pandas==2.2.2
+beautifulsoup4==4.12.3
+tenacity==8.5.0
 python-dateutil==2.9.0.post0
 pytz==2024.1
-
-google-api-python-client==2.137.0
-google-auth==2.32.0
-google-auth-httplib2==0.2.0
-# (인터랙티브 인증은 안 쓰지만 호환성 위해 포함해도 무방)
-google-auth-oauthlib==1.2.0
-
 requests==2.32.3
