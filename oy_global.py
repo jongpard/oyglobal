@@ -18,8 +18,15 @@ JS_EXTRACT = r"""
   const inRange = (v) => typeof v === "number" && v >= 0.5 && v <= 500;
   const scrollTop = () => window.pageYOffset || document.documentElement.scrollTop || document.body.scrollTop || 0;
   const absTop = (el) => (el.getBoundingClientRect().top + scrollTop());
+  const isVisible = (el) => {
+    if (!el) return false;
+    const style = getComputedStyle(el);
+    if (style.visibility === "hidden" || style.display === "none") return false;
+    const r = el.getBoundingClientRect();
+    return r.width > 0 && r.height > 0;
+  };
 
-  // ---------- A) Top Orders 필터 바로 섹션 컨테이너 찾기 ----------
+  // ---------- A) Top Orders 필터 바로 섹션 컨테이너 ----------
   const FILTER_WORDS = [
     "All","Skincare","Makeup","Bath & Body","Hair","Face Masks","Suncare",
     "Makeup Brush & Tools","Wellness","Supplements","Food & Drink"
@@ -44,14 +51,20 @@ JS_EXTRACT = r"""
     if (!topOrdersContainer) topOrdersContainer = bar.closest("section,div,article") || bar.parentElement || bar;
   }
 
-  // ---------- B) 트렌딩 헤더 Y(절대좌표) 찾기 ----------
-  // 영어만 존재 → 견고하게 매칭
-  const trendHeads = Array.from(document.querySelectorAll("body *")).filter(el =>
+  // ---------- B) '보이는' 트렌딩 헤더의 절대 Y ----------
+  const trendHeadsAll = Array.from(document.querySelectorAll("body *")).filter(el =>
     /what.?s\s+trending\s+in\s+korea/i.test((el.textContent || "").trim())
-  ).sort((a,b)=>absTop(a)-absTop(b));
-  const trendingY = trendHeads.length ? absTop(trendHeads[0]) : Infinity;
+  );
+  const trendHeadsVisible = trendHeadsAll
+    .filter(isVisible)
+    .map(el => ({el, y: absTop(el)}))
+    // 트렌딩은 페이지 중단 이후에 위치하므로 너무 상단(노이즈) 배제
+    .filter(x => x.y > 400)
+    .sort((a,b)=>a.y - b.y);
 
-  // ---------- C) 섹션 내부 카드만, 그리고 y < trendingY 만 수집 ----------
+  const trendingY = trendHeadsVisible.length ? trendHeadsVisible[0].y : Infinity;
+
+  // ---------- C) Top Orders 섹션 내 카드만, 그리고 y < trendingY ----------
   const anchorsAll = Array.from(document.querySelectorAll("a[href*='product/detail']"));
   const anchors = topOrdersContainer
     ? Array.from(topOrdersContainer.querySelectorAll("a[href*='product/detail']"))
@@ -69,8 +82,7 @@ JS_EXTRACT = r"""
     const card = a.closest("li, article, .item, .unit, .prd_info, .product, .prod, .box, .list, .list_item") || a;
     const yAbs = absTop(card);
 
-    // 트렌딩 헤더 아래는 컷
-    if (yAbs >= trendingY) continue;
+    if (yAbs >= trendingY) continue;  // 트렌딩 헤더 아래는 컷
 
     // 브랜드
     let brand = "";
@@ -103,11 +115,11 @@ JS_EXTRACT = r"""
     if (!priceText) priceText = (card.innerText || "").replace(/\s+/g," ");
 
     const amounts = [];
-    // (1) US$ 붙은 금액
+    // 1) US$ 붙은 금액
     for (const m of priceText.matchAll(/US\$ ?([\d,]+(?:\.\d{2})?)/gi)) {
       const v = asNum(m[0]); if (v != null) amounts.push(v);
     }
-    // (2) 보조: US$가 전혀 없을 때만 소수 둘째자리 허용
+    // 2) 보조: US$가 전혀 없을 때만 소수 둘째자리 허용
     if (amounts.length === 0) {
       for (const m of priceText.matchAll(/\b([\d,]+\.\d{2})\b/g)) {
         const v = asNum(m[0]); if (v != null) amounts.push(v);
@@ -147,10 +159,10 @@ JS_EXTRACT = r"""
 
   return {
     debug: {
-      found_filter_bars: filterBars.length,
+      filter_bars: filterBars.length,
       top_orders_links: topOrdersContainer ? topOrdersContainer.querySelectorAll("a[href*='product/detail']").length : 0,
-      trending_header_y: Number.isFinite(trendingY) ? trendingY : null,
-      anchors_total: anchors.length,
+      trendingY: Number.isFinite(trendingY) ? trendingY : null,
+      anchors_considered: anchors.length,
     },
     candidateCount: rows.length,
     picked: items.length,
@@ -175,21 +187,21 @@ async def scrape_oliveyoung_global() -> List[Dict]:
         # 끝까지 스크롤(지연 로딩 안정화)
         prev = -1; same = 0
         for i in range(40):
-            await page.mouse.wheel(0, 3200)
-            await asyncio.sleep(0.7)
-            cnt = await page.locator("a[href*='product/detail']").count()
-            if cnt == prev: same += 1
-            else: same = 0
-            prev = cnt
-            if i >= 14 and same >= 3:
-                break
+          await page.mouse.wheel(0, 3200)
+          await asyncio.sleep(0.7)
+          cnt = await page.locator("a[href*='product/detail']").count()
+          if cnt == prev: same += 1
+          else: same = 0
+          prev = cnt
+          if i >= 14 and same >= 3:
+            break
 
         res = await page.evaluate(JS_EXTRACT)
         await context.close()
 
     dbg = res.get("debug", {}) or {}
-    print(f"🔎 전체 앵커(섹션 기준): {dbg.get('anchors_total')}, 후보 카드: {res.get('candidateCount')}, 최종 채택: {res.get('picked')}")
-    print(f"🧭 필터바 수={dbg.get('found_filter_bars')}, Top Orders 링크={dbg.get('top_orders_links')}, 트렌딩 헤더 Y={dbg.get('trending_header_y')}")
+    print(f"🔎 섹션 앵커수={dbg.get('anchors_considered')}, 후보={res.get('candidateCount')}, 최종={res.get('picked')}")
+    print(f"🧭 필터바={dbg.get('filter_bars')}, TopOrders링크={dbg.get('top_orders_links')}, 트렌딩Y={dbg.get('trendingY')}")
 
     items: List[Dict] = res.get("items", [])
     for r in items:
