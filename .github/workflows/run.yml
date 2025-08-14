@@ -2,8 +2,11 @@ name: Crawl OY Global (US) and Notify Slack
 
 on:
   schedule:
-    - cron: "0 0 * * *"  # UTC 00:00 == KST 09:00
+    - cron: "0 0 * * *"
   workflow_dispatch:
+
+permissions:
+  contents: write   # ← 추가: actions가 커밋/푸시 가능하도록
 
 jobs:
   crawl:
@@ -14,7 +17,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          persist-credentials: true
+          persist-credentials: false   # ← 토큰 충돌 방지
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -36,10 +39,14 @@ jobs:
         run: |
           python main.py
 
-      - name: Commit CSV if changed
+      - name: Setup git auth
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
+
+      - name: Commit CSV if changed
+        run: |
           git add data/*.csv || true
           git commit -m "data: update OY Global rankings (KST)" || echo "No changes to commit"
           git push || echo "No push"
