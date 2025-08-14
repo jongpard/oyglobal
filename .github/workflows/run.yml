@@ -12,8 +12,9 @@ jobs:
   run:
     runs-on: ubuntu-latest
 
+    # GitHub Secrets -> env 매핑
     env:
-      # Google Drive
+      # Google Drive (OAuth 또는 Service Account 둘 다 지원)
       GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
       GDRIVE_SA_JSON_B64: ${{ secrets.GDRIVE_SA_JSON_B64 }}
       GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
@@ -49,6 +50,8 @@ jobs:
           git push
 
       - name: Upload latest CSV to Google Drive
+        # Drive 실패해도 워크플로우 계속 진행
+        continue-on-error: true
         run: |
           CSV=$(ls -1t data/*.csv 2>/dev/null | head -n1 || true)
           if [ -z "$CSV" ]; then
@@ -63,10 +66,11 @@ jobs:
           python gdrive_upload.py "$CSV"
 
       - name: Send Slack Top 10 message
-        if: ${{ env.SLACK_WEBHOOK_URL != '' }}
-        env:
-          SLACK_WEBHOOK_URL: ${{ env.SLACK_WEBHOOK_URL }}
         run: |
+          if [ -z "$SLACK_WEBHOOK_URL" ]; then
+            echo "No SLACK_WEBHOOK_URL. Skipping Slack notify."
+            exit 0
+          fi
           CSV=$(ls -1t data/*.csv 2>/dev/null | head -n1 || true)
           if [ -z "$CSV" ]; then
             echo "No CSV found. Skipping Slack notify."
