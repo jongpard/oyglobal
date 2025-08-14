@@ -5,7 +5,7 @@ from datetime import datetime, timezone, timedelta
 import pandas as pd
 
 from oy_global import scrape_oliveyoung_global
-from slack_top10 import post_top10_to_slack
+from slack_notify import post_top10_to_slack
 
 KST = timezone(timedelta(hours=9))
 
