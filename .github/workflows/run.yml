@@ -2,7 +2,7 @@ name: Crawl OY Global (KR-basis) and Notify Slack
 
 on:
   schedule:
-    - cron: "0 0 * * *"  # UTC 00:00 == KST 09:00
+    - cron: "0 0 * * *"
   workflow_dispatch:
 
 permissions:
@@ -33,14 +33,12 @@ jobs:
       - name: Run crawler
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-          # Google Drive OAuth
           GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
           GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
           GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
           GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
-          # Options
           OY_DEBUG: "1"
-          OY_FORCE_KR: "1"     # ← 한국 기준 강제
+          OY_FORCE_KR: "1"
           OY_FORCE_US: "0"
         run: |
           python main.py
