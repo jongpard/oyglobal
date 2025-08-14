@@ -2,14 +2,13 @@
 import re
 from typing import Dict, Optional, List
 
-TAG_RE = re.compile(r"<[^>]+>")
-URL_RE = re.compile(r"https?://\S+")
-PRDTNO_RE = re.compile(r"prdtNo=\w+", re.I)
-# value="...": HTML 속성 값 제거용 (오탐 방지)
+# ----- 텍스트 정리 -----
+TAG_RE        = re.compile(r"<[^>]+>")
+URL_SCHEME_RE = re.compile(r"https?://\S+|//\S+", re.I)      # http/https + 스킴없는 URL까지
+ATTR_URL_RE   = re.compile(r'(?:src|href)\s*=\s*(?:"[^"]+"|\'[^\']+\')', re.I)
+PRDTNO_RE     = re.compile(r"prdtNo=\w+", re.I)
 VALUE_ATTR_RE = re.compile(r'value\s*=\s*"(?:[^"\\]|\\.)*"|value\s*=\s*\'(?:[^\'\\]|\\.)*\'', re.I)
-
-def _strip_tags(s: str) -> str:
-    return TAG_RE.sub(" ", s or "")
+LONGNUM_RE    = re.compile(r"\d{5,}")  # 가격과 무관한 장문 숫자 제거(이미지ID 등)
 
 def _norm(s: str) -> str:
     if not s:
@@ -17,13 +16,23 @@ def _norm(s: str) -> str:
     s = s.replace("\xa0", " ").replace("&nbsp;", " ").replace("\n", " ")
     return s
 
-# 통화 기호가 붙은 금액(두 자리 소수 필수)
-CURR_RE = re.compile(r"US?\$\s*((?:\d{1,3}(?:,\d{3})*|\d+)\.\d{2})", re.I)
+def _strip_noise(text: str) -> str:
+    """가격과 무관한 소스(링크/속성/장문숫자 등) 제거."""
+    t = _norm(text)
+    t = URL_SCHEME_RE.sub(" ", t)
+    t = ATTR_URL_RE.sub(" ", t)
+    t = PRDTNO_RE.sub(" ", t)
+    t = VALUE_ATTR_RE.sub(" ", t)
+    t = TAG_RE.sub(" ", t)
+    t = LONGNUM_RE.sub(" ", t)
+    return re.sub(r"\s+", " ", t).strip()
 
-# 통화 기호 없는 금액(두 자리 소수만) – CSS로 'US$'가 붙는 경우 대비
-PLAIN2_RE = re.compile(r"\b((?:\d{1,3}(?:,\d{3})*|\d+)\.\d{2})\b")
-
-# 진짜 텍스트 “Value:”만 매칭 (value= 속성은 제외)
+# ----- 금액 패턴 -----
+# US$ 가 붙은 금액(두 자리 소수 필수)
+CURR_RE  = re.compile(r"US?\$\s*((?:\d{1,3}(?:,\d{3})*|\d+)\.\d{2})", re.I)
+# 통화기호 없는 금액(두 자리 소수 필수) — CSS로 기호가 붙는 케이스 대응
+PLAIN_RE = re.compile(r"\b((?:\d{1,3}(?:,\d{3})*|\d+)\.\d{2})\b")
+# 진짜 텍스트 "Value:" 만 (value= 속성 제외)
 VALUE_RE = re.compile(
     r"(?<![A-Za-z0-9_])value(?!\s*=)\s*[:：]?\s*(?:US?\$)?\s*((?:\d{1,3}(?:,\d{3})*|\d+)\.\d{2})",
     re.I,
@@ -41,40 +50,34 @@ def _find_amounts(text: str) -> List[float]:
         v = _to_float(m.group(1))
         if v is not None:
             vals.append(v)
-    for m in PLAIN2_RE.finditer(text):
+    # 통화기호 없는 금액은 보조로만 사용
+    for m in PLAIN_RE.finditer(text):
         v = _to_float(m.group(1))
         if v is not None:
             vals.append(v)
-    # 합리적 범위만 유지
-    return [v for v in vals if 0.5 <= v <= 1000]
+    # 합리적 범위만 (0.5 ~ 500 USD)
+    vals = [v for v in vals if 0.5 <= v <= 500]
+    return vals
 
 def parse_prices_and_discount(price_block_text: str) -> Dict:
     """
     규칙:
-      - 텍스트 내에서 'Value:' 가 보이면 정가 = Value, 현재가 = 첫 번째 금액
-      - 금액이 2개 이상이면 현재가 = min, 정가 = max
-      - 금액이 1개면 할인 없음(정가=현재가)
+      - 텍스트 내 'Value:'가 보이면 정가=Value, 현재가=첫 번째 금액
+      - 금액 2개 이상: 현재가=min, 정가=max
+      - 금액 1개: 현재가=정가
     """
-    raw = _norm(price_block_text)
-    # 가격과 무관한 숫자 소스 제거
-    raw = URL_RE.sub(" ", raw)
-    raw = PRDTNO_RE.sub(" ", raw)
-    raw = VALUE_ATTR_RE.sub(" ", raw)
+    raw = _strip_noise(price_block_text)
 
-    # 1차: 텍스트에서 파싱
     vm = VALUE_RE.search(raw)
     value_price = _to_float(vm.group(1)) if vm else None
+    if value_price is not None and not (0.5 <= value_price <= 500):
+        value_price = None  # 말이 안 되는 값은 무시
+
     amounts = _find_amounts(raw)
 
-    # 2차: 태그 제거본에서도 한 번 더 시도
-    if not amounts:
-        raw2 = _strip_tags(raw)
-        if value_price is None:
-            vm2 = VALUE_RE.search(raw2)
-            value_price = _to_float(vm2.group(1)) if vm2 else None
-        amounts = _find_amounts(raw2)
+    price_current = None
+    price_original = None
 
-    price_current = price_original = None
     if value_price is not None and amounts:
         price_current = amounts[0]
         price_original = value_price
@@ -88,7 +91,7 @@ def parse_prices_and_discount(price_block_text: str) -> Dict:
     discount = None
     if price_current is not None and price_original and price_original > 0:
         d = round((1 - (price_current / price_original)) * 100, 2)
-        discount = 0.0 if d < 0 else d
+        discount = max(d, 0.0)
 
     return {
         "price_current_usd": price_current,
