@@ -1,0 +1,87 @@
+﻿rank,brand,name,price,price_str,original_price,discount_pct,url
+1,Sign In / Sign Up,Sign In / Sign Up,,,,,
+2,Track Orders,Track Orders,,,,,https://global.oliveyoung.com/member/trackorder
+3,My Wishlist,My Wishlist,,,,,https://global.oliveyoung.com/myaccount/wish
+4,Anua,Anua,,,,,https://global.oliveyoung.com/event/planning?plndpNo=1693
+5,Best,Best,,,,,https://global.oliveyoung.com/display/page/best-seller
+6,New,New,,,,,https://global.oliveyoung.com/display/page/new-arrivals
+7,Sale,Sale,,,,,https://global.oliveyoung.com/display/page/flash-deal
+8,Brands,Brands,,,,,https://global.oliveyoung.com/display/page/brand
+9,Centella Asiatica Extract (Cica Care),Centella Asiatica Extract (Cica Care),,,,,javascript:;
+10,All Skincare,All Skincare,,,,,https://global.oliveyoung.com/display/category?ctgrNo=1000000008
+11,Moisturizers,Moisturizers,,,,,https://global.oliveyoung.com/display/category?ctgrNo=1000000009
+12,Cleansers,Cleansers,,,,,https://global.oliveyoung.com/display/category?ctgrNo=1000000010
+13,Gift Set,Gift Set,,,,,https://global.oliveyoung.com/display/category?ctgrNo=1000000012
+14,Acne & Blemish Treatments,Acne & Blemish Treatments,,,,,https://global.oliveyoung.com/display/category?ctgrNo=1000000261
+15,Combination&Normal,Combination&Normal,,,,,https://global.oliveyoung.com/display/category?query=&attrValNo=AT000037&attrNo=&ctgrNo=1000000008
+16,Dry,Dry,,,,,https://global.oliveyoung.com/display/category?query=&attrValNo=AT000038&attrNo=&ctgrNo=1000000008
+17,Oily,Oily,,,,,https://global.oliveyoung.com/display/category?query=&attrValNo=AT000039&attrNo=&ctgrNo=1000000008
+18,Sensitive,Sensitive,,,,,https://global.oliveyoung.com/display/category?query=&attrValNo=AT000040&attrNo=&ctgrNo=1000000008
+19,Acne,Acne,,,,,https://global.oliveyoung.com/display/category?query=&attrValNo=AT000014&attrNo=&ctgrNo=1000000008
+20,Brightening,Brightening,,,,,https://global.oliveyoung.com/display/category?query=&attrValNo=AT000016&attrNo=&ctgrNo=1000000008
+21,Dullness,Dullness,,,,,https://global.oliveyoung.com/display/category?query=&attrValNo=AT000019&attrNo=&ctgrNo=1000000008
+22,Moisturising,Moisturising,,,,,https://global.oliveyoung.com/display/category?query=&attrValNo=AT000023&attrNo=&ctgrNo=1000000008
+23,Soothing,Soothing,,,,,https://global.oliveyoung.com/display/category?query=&attrValNo=AT000028&attrNo=&ctgrNo=1000000008
+24,Fine Dust Removal,Fine Dust Removal,,,,,https://global.oliveyoung.com/display/category?query=&attrValNo=AT000034&attrNo=&ctgrNo=1000000008
+25,Visible Pores,Visible Pores,,,,,https://global.oliveyoung.com/display/category?query=&attrValNo=AT000032&attrNo=&ctgrNo=1000000008
+26,Well-aging,Well-aging,,,,,https://global.oliveyoung.com/display/category?query=&attrValNo=AT000033&attrNo=&ctgrNo=1000000008
+27,Hyaluronic acid,Hyaluronic acid,,,,,https://global.oliveyoung.com/display/category?query=&attrValNo=AT001122&attrNo=&ctgrNo=1000000008
+28,Panthenol,Panthenol,,,,,https://global.oliveyoung.com/display/category?query=&attrValNo=AT000994&attrNo=&ctgrNo=1000000008
+29,Ceramide,Ceramide,,,,,https://global.oliveyoung.com/display/category?query=&attrValNo=AT000592&attrNo=&ctgrNo=1000000008
+30,Niacinamide,Niacinamide,,,,,https://global.oliveyoung.com/display/category?query=&attrValNo=AT000217&attrNo=&ctgrNo=1000000008
+31,Collagen,Collagen,,,,,https://global.oliveyoung.com/display/category?query=&attrValNo=AT000936&attrNo=&ctgrNo=1000000008
+32,Glutathione in CUSHION!,Glutathione in CUSHION!,,,,,https://global.oliveyoung.com/product/detail?prdtNo=GA250732271
+33,All Makeup,All Makeup,,,,,https://global.oliveyoung.com/display/category?ctgrNo=1000000031
+34,Face,Face,,,,,https://global.oliveyoung.com/display/category?ctgrNo=1000000032
+35,Eye,Eye,,,,,https://global.oliveyoung.com/display/category?ctgrNo=1000000040
+36,Lip,Lip,,,,,https://global.oliveyoung.com/display/category?ctgrNo=1000000045
+37,Nail,Nail,,,,,https://global.oliveyoung.com/display/category?ctgrNo=1000000049
+38,BB & CC Cream,BB & CC Cream,,,,,https://global.oliveyoung.com/display/category?ctgrNo=1000000033
+39,Foundation,Foundation,,,,,https://global.oliveyoung.com/display/category?ctgrNo=1000000034
+40,Makeup Cushion,Makeup Cushion,,,,,https://global.oliveyoung.com/display/category?ctgrNo=1000000179
+41,Face Primer,Face Primer,,,,,https://global.oliveyoung.com/display/category?ctgrNo=1000000035
+42,Powder & Pact,Powder & Pact,,,,,https://global.oliveyoung.com/display/category?ctgrNo=1000000036
+43,Concealer,Concealer,,,,,https://global.oliveyoung.com/display/category?ctgrNo=1000000037
+44,Blush,Blush,,,,,https://global.oliveyoung.com/display/category?ctgrNo=1000000038
+45,Contour,Contour,,,,,https://global.oliveyoung.com/display/category?ctgrNo=1000000039
+46,Eyebrow,Eyebrow,,,,,https://global.oliveyoung.com/display/category?ctgrNo=1000000041
+47,Eyeshadow,Eyeshadow,,,,,https://global.oliveyoung.com/display/category?ctgrNo=1000000042
+48,Eyeliner,Eyeliner,,,,,https://global.oliveyoung.com/display/category?ctgrNo=1000000043
+49,Eyelashes,Eyelashes,,,,,https://global.oliveyoung.com/display/category?ctgrNo=1000000044
+50,Lip Stick,Lip Stick,,,,,https://global.oliveyoung.com/display/category?ctgrNo=1000000046
+51,Lip Gloss & Lip Tint,Lip Gloss & Lip Tint,,,,,https://global.oliveyoung.com/display/category?ctgrNo=1000000047
+52,Lip Balm & Treatment,Lip Balm & Treatment,,,,,https://global.oliveyoung.com/display/category?ctgrNo=1000000048
+53,All Hair,All Hair,,,,,https://global.oliveyoung.com/display/category?ctgrNo=1000000070
+54,Hair Wash,Hair Wash,,,,,https://global.oliveyoung.com/display/category?ctgrNo=1000000071
+55,Treatments,Treatments,,,,,https://global.oliveyoung.com/display/category?ctgrNo=1000000074
+56,Hair Color & Perms,Hair Color & Perms,,,,,https://global.oliveyoung.com/display/category?ctgrNo=1000000079
+57,Hair Styling,Hair Styling,,,,,https://global.oliveyoung.com/display/category?ctgrNo=1000000081
+58,Hair Styling Devices,Hair Styling Devices,,,,,https://global.oliveyoung.com/display/category?ctgrNo=1000000149
+59,Hair Perfume,Hair Perfume,,,,,https://global.oliveyoung.com/display/category?ctgrNo=1000000208
+60,Coloured,Coloured,,,,,https://global.oliveyoung.com/display/category?query=&attrValNo=AT000126&attrNo=&ctgrNo=1000000070
+61,Curly & Wavy,Curly & Wavy,,,,,https://global.oliveyoung.com/display/category?query=&attrValNo=AT000127&attrNo=&ctgrNo=1000000070
+62,Fine,Fine,,,,,https://global.oliveyoung.com/display/category?query=&attrValNo=AT000129&attrNo=&ctgrNo=1000000070
+63,Greying,Greying,,,,,https://global.oliveyoung.com/display/category?query=&attrValNo=AT000131&attrNo=&ctgrNo=1000000070
+64,Hair loss,Hair loss,,,,,https://global.oliveyoung.com/display/category?query=&attrValNo=AT000132&attrNo=&ctgrNo=1000000070
+65,Weakened,Weakened,,,,,https://global.oliveyoung.com/display/category?query=&attrValNo=AT000134&attrNo=&ctgrNo=1000000070
+66,Anti-Dandruff,Anti-Dandruff,,,,,https://global.oliveyoung.com/display/category?query=&attrValNo=AT000135&attrNo=&ctgrNo=1000000070
+67,Anti-Frizz,Anti-Frizz,,,,,https://global.oliveyoung.com/display/category?query=&attrValNo=AT000136&attrNo=&ctgrNo=1000000070
+68,Balancing,Balancing,,,,,https://global.oliveyoung.com/display/category?query=&attrValNo=AT000137&attrNo=&ctgrNo=1000000070
+69,Colour Protection,Colour Protection,,,,,https://global.oliveyoung.com/display/category?query=&attrValNo=AT000138&attrNo=&ctgrNo=1000000070
+70,Damage Repair,Damage Repair,,,,,https://global.oliveyoung.com/display/category?query=&attrValNo=AT000139&attrNo=&ctgrNo=1000000070
+71,Hair Growth,Hair Growth,,,,,https://global.oliveyoung.com/display/category?query=&attrValNo=AT000140&attrNo=&ctgrNo=1000000070
+72,Heat Protection,Heat Protection,,,,,https://global.oliveyoung.com/display/category?query=&attrValNo=AT000141&attrNo=&ctgrNo=1000000070
+73,Hydrating,Hydrating,,,,,https://global.oliveyoung.com/display/category?query=&attrValNo=AT000142&attrNo=&ctgrNo=1000000070
+74,Scalp Treatment,Scalp Treatment,,,,,https://global.oliveyoung.com/display/category?query=&attrValNo=AT000144&attrNo=&ctgrNo=1000000070
+75,Shine,Shine,,,,,https://global.oliveyoung.com/display/category?query=&attrValNo=AT000145&attrNo=&ctgrNo=1000000070
+76,Thickening,Thickening,,,,,https://global.oliveyoung.com/display/category?query=&attrValNo=AT000146&attrNo=&ctgrNo=1000000070
+77,Volumising,Volumising,,,,,https://global.oliveyoung.com/display/category?query=&attrValNo=AT000147&attrNo=&ctgrNo=1000000070
+78,All Face Masks,All Face Masks,,,,,https://global.oliveyoung.com/display/category?ctgrNo=1000000003
+79,Sheet Masks,Sheet Masks,,,,,https://global.oliveyoung.com/display/category?ctgrNo=1000000004
+80,Facial Masks,Facial Masks,,,,,https://global.oliveyoung.com/display/category?ctgrNo=1000000005
+81,Nose Pack,Nose Pack,,,,,https://global.oliveyoung.com/display/category?ctgrNo=1000000006
+82,Patches,Patches,,,,,https://global.oliveyoung.com/display/category?ctgrNo=1000000007
+83,Pads,Pads,,,,,https://global.oliveyoung.com/display/category?ctgrNo=1000000148
+84,Blackheads,Blackheads,,,,,https://global.oliveyoung.com/display/category?query=&attrValNo=AT000015&attrNo=&ctgrNo=1000000003
+85,Deep Cleansing,Deep Cleansing,,,,,https://global.oliveyoung.com/display/category?query=&attrValNo=AT000018&attrNo=&ctgrNo=1000000003
+86,Houttuynia Cordata Extract,Houttuynia Cordata Extract,,,,,https://global.oliveyoung.com/display/category?query=&attrValNo=AT000715&attrNo=&ctgrNo=1000000003
