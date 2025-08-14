@@ -1,23 +1,73 @@
-# Google Drive 업로드
-- name: Upload latest CSV to Google Drive
-  if: ${{ env.GDRIVE_FOLDER_ID != '' && env.GDRIVE_SERVICE_ACCOUNT_JSON != '' }}
-  run: |
-    CSV=$(ls -1t data/*.csv 2>/dev/null | head -n1 || true)
-    if [ -z "$CSV" ]; then
-      echo "No CSV found. Skipping Drive upload."
-      exit 0
-    fi
-    echo "Uploading $CSV to Google Drive folder $GDRIVE_FOLDER_ID"
-    python gdrive_upload.py "$CSV"
+name: oliveyoung-global-scraper
 
-# Slack 전송
-- name: Send Slack Top 10 message
-  if: ${{ env.SLACK_WEBHOOK_URL != '' }}
-  run: |
-    CSV=$(ls -1t data/*.csv 2>/dev/null | head -n1 || true)
-    if [ -z "$CSV" ]; then
-      echo "No CSV found. Skipping Slack notify."
-      exit 0
-    fi
-    echo "Notifying Slack with $CSV"
-    python slack_notify.py "$CSV"
+on:
+  workflow_dispatch: {}
+  schedule:
+    - cron: "0 0 * * *"   # 매일 09:00 KST
+
+# 레포에 CSV 커밋/푸시하려면 필요
+permissions:
+  contents: write
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+
+    # 🔑 GitHub Secrets → env 매핑
+    env:
+      GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
+      GDRIVE_SERVICE_ACCOUNT_JSON: ${{ secrets.GDRIVE_SERVICE_ACCOUNT_JSON }}
+      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          python -m playwright install chromium
+
+      - name: Run scraper
+        run: python main.py
+
+      - name: Commit CSV to repo
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/*.csv || true
+          git commit -m "data: update $(date -u +'%Y-%m-%d')" || echo "No changes to commit"
+          git push
+
+      - name: Upload latest CSV to Google Drive
+        if: ${{ env.GDRIVE_FOLDER_ID != '' && env.GDRIVE_SERVICE_ACCOUNT_JSON != '' }}
+        env:
+          GDRIVE_FOLDER_ID: ${{ env.GDRIVE_FOLDER_ID }}
+          GDRIVE_SERVICE_ACCOUNT_JSON: ${{ env.GDRIVE_SERVICE_ACCOUNT_JSON }}
+        run: |
+          CSV=$(ls -1t data/*.csv 2>/dev/null | head -n1 || true)
+          if [ -z "$CSV" ]; then
+            echo "No CSV found. Skipping Drive upload."
+            exit 0
+          fi
+          echo "Uploading $CSV to Google Drive folder $GDRIVE_FOLDER_ID"
+          python gdrive_upload.py "$CSV"
+
+      - name: Send Slack Top 10 message
+        if: ${{ env.SLACK_WEBHOOK_URL != '' }}
+        env:
+          SLACK_WEBHOOK_URL: ${{ env.SLACK_WEBHOOK_URL }}
+        run: |
+          CSV=$(ls -1t data/*.csv 2>/dev/null | head -n1 || true)
+          if [ -z "$CSV" ]; then
+            echo "No CSV found. Skipping Slack notify."
+            exit 0
+          fi
+          echo "Notifying Slack with $CSV"
+          python slack_notify.py "$CSV"
