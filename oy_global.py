@@ -7,6 +7,7 @@ from utils import kst_today_str
 
 BEST_URL = "https://global.oliveyoung.com/display/page/best-seller?target=pillsTab1Nav1"
 
+# 페이지 안에서 "Top Orders(베스트셀러)" 섹션만 정확히 추출
 JS_EXTRACT = r"""
 () => {
   const asNum = (s) => {
@@ -17,34 +18,48 @@ JS_EXTRACT = r"""
   };
   const inRange = (v) => typeof v === "number" && v >= 0.5 && v <= 500;
 
-  // -------- 트렌딩 섹션 컨테이너 정확 탐지 --------
-  let trendingContainer = null;
-  (function findTrendingContainer(){
-    const heads = Array.from(document.querySelectorAll("body *"))
-      .filter(el => /what.?s trending in korea/i.test((el.textContent || "").trim()));
-    if (!heads.length) return;
+  // ---------- 1) Top Orders 섹션 컨테이너 찾기 ----------
+  const FILTER_WORDS = [
+    "All","Skincare","Makeup","Bath & Body","Hair","Face Masks","Suncare",
+    "Makeup Brush & Tools","Wellness","Supplements","Food & Drink"
+  ].map(s => s.toLowerCase());
 
-    // 가장 위에 있는 헤더 기준
-    heads.sort((a,b)=>a.getBoundingClientRect().top - b.getBoundingClientRect().top);
-    const head = heads[0];
+  let topOrdersContainer = null;
 
-    // 헤더에서 위로 올라가며 product/detail 링크를 '충분히' 포함하는 가장 가까운 조상 선택
-    const MIN_LINKS = 4;    // 섹션이라고 부를 최소 링크 수
-    const MAX_LINKS = 60;   // 너무 커지면 전체 페이지일 수 있으니 상한
-    let node = head;
-    for (let i=0; i<8 && node; i++, node = node.parentElement) {
-      const cnt = node.querySelectorAll("a[href*='product/detail']").length;
+  // 후보: 필터 칩 텍스트를 모두(혹은 대부분) 포함하는 노드
+  const nodes = Array.from(document.querySelectorAll("body *")).filter(el => {
+    const t = (el.textContent || "").toLowerCase();
+    let hit = 0;
+    for (const w of FILTER_WORDS) if (t.includes(w)) hit++;
+    return hit >= 5; // 5개 이상 포함하면 필터 바로 간주
+  });
+
+  // 가장 위에 있는 필터 바를 기준으로, 적당한 조상 컨테이너 선택
+  if (nodes.length) {
+    nodes.sort((a,b)=> a.getBoundingClientRect().top - b.getBoundingClientRect().top);
+    const bar = nodes[0];
+
+    // 위로 올라가며 '상품 상세 링크'를 적절히 포함하는 조상 컨테이너 선택
+    const MIN_LINKS = 20;  // 최소 링크 수
+    const MAX_LINKS = 160; // 너무 크면 페이지 전체일 수 있으므로 상한
+    let cur = bar;
+    for (let i=0; i<10 && cur; i++, cur = cur.parentElement) {
+      const cnt = cur.querySelectorAll("a[href*='product/detail']").length;
       if (cnt >= MIN_LINKS && cnt <= MAX_LINKS) {
-        trendingContainer = node;
+        topOrdersContainer = cur;
         break;
       }
     }
-    // 못 찾으면 헤더 바로 위 컨테이너 시도
-    if (!trendingContainer) trendingContainer = head.closest("section,div,article") || head.parentElement || head;
-  })();
+    // 실패하면 바로 상위 섹션/디브라도 사용 (최후보)
+    if (!topOrdersContainer) topOrdersContainer = bar.closest("section,div,article") || bar.parentElement || bar;
+  }
 
-  // -------- 베스트셀러 카드 스캔 --------
-  const anchors = Array.from(document.querySelectorAll("a[href*='product/detail']"));
+  // ---------- 2) 섹션 안의 카드만 수집 ----------
+  const allAnchors = Array.from(document.querySelectorAll("a[href*='product/detail']"));
+  const anchors = topOrdersContainer
+      ? Array.from(topOrdersContainer.querySelectorAll("a[href*='product/detail']"))
+      : allAnchors; // 안전망: 못 찾으면 전체(후에 정렬로 Top Orders가 먼저 나옴)
+
   const seen = new Set();
   const rows = [];
 
@@ -55,10 +70,6 @@ JS_EXTRACT = r"""
     if (seen.has(abs)) continue;
 
     const card = a.closest("li, article, .item, .unit, .prd_info, .product, .prod, .box, .list, .list_item") || a;
-
-    // 트렌딩 섹션 내부 카드는 제외
-    if (trendingContainer && trendingContainer.contains(card)) continue;
-
     const rect = card.getBoundingClientRect();
     const yAbs = rect.top + window.scrollY;
 
@@ -67,7 +78,7 @@ JS_EXTRACT = r"""
     const brandEl = card.querySelector('[class*="brand" i], strong.brand');
     if (brandEl) brand = (brandEl.textContent || "").trim();
 
-    // 상품명
+    // 상품명 (a title/aria → 명칭 셀렉터 → img alt → a 텍스트)
     let name = a.getAttribute("title") || a.getAttribute("aria-label") || "";
     if (!name || name.length < 3) {
       const nameEl = card.querySelector("p.name, .name, .prd_name, .product-name, strong.name");
@@ -87,7 +98,7 @@ JS_EXTRACT = r"""
     if (imgEl) img = imgEl.src || imgEl.getAttribute("src") || "";
 
     // ---------- 가격 ----------
-    // 1) price 관련 요소의 보이는 텍스트 우선
+    // 1) price 관련 요소 텍스트 우선
     let priceText = Array.from(card.querySelectorAll(
       '[class*="price" i], [id*="price" i], [aria-label*="$" i], [aria-label*="US$" i]'
     )).map(el => (el.innerText || "").replace(/\s+/g," ")).join(" ").trim();
@@ -99,7 +110,7 @@ JS_EXTRACT = r"""
     for (const m of priceText.matchAll(/US\$ ?([\d,]+(?:\.\d{2})?)/gi)) {
       const v = asNum(m[0]); if (v != null) amounts.push(v);
     }
-    // (B) A가 비어있을 때만, 소수 둘째자리 금액 보조
+    // (B) A가 비었을 때만 소수 둘째자리 보조
     if (amounts.length === 0) {
       for (const m of priceText.matchAll(/\b([\d,]+\.\d{2})\b/g)) {
         const v = asNum(m[0]); if (v != null) amounts.push(v);
@@ -133,24 +144,22 @@ JS_EXTRACT = r"""
     seen.add(abs);
   }
 
-  // 위→아래 정렬, 100개 제한
+  // ---------- 3) 위→아래 정렬 후 상위 100개 ----------
   rows.sort((a, b) => a.y - b.y);
   const items = rows.slice(0, 100).map((r, i) => ({ rank: i + 1, ...r }));
 
-  // 디버그: 트렌딩 컨테이너 대략 정보
-  let trendInfo = null;
-  if (trendingContainer) {
-    const r = trendingContainer.getBoundingClientRect();
-    trendInfo = { top: r.top + window.scrollY, bottom: r.bottom + window.scrollY, links: trendingContainer.querySelectorAll("a[href*='product/detail']").length };
+  // 디버그 정보
+  let info = { anchors_total: document.querySelectorAll("a[href*='product/detail']").length };
+  if (topOrdersContainer) {
+    const r = topOrdersContainer.getBoundingClientRect();
+    info.top_orders = {
+      links: topOrdersContainer.querySelectorAll("a[href*='product/detail']").length,
+      y_top: r.top + window.scrollY,
+      y_bottom: r.bottom + window.scrollY
+    };
   }
 
-  return {
-    anchorCount: anchors.length,
-    candidateCount: rows.length,
-    picked: items.length,
-    trendInfo,
-    items
-  };
+  return { info, candidateCount: rows.length, picked: items.length, items };
 }
 """
 
@@ -183,10 +192,11 @@ async def scrape_oliveyoung_global() -> List[Dict]:
         res = await page.evaluate(JS_EXTRACT)
         await context.close()
 
-    print(f"🔎 앵커 수: {res.get('anchorCount')}, 후보 카드: {res.get('candidateCount')}, 최종 채택: {res.get('picked')}")
-    ti = res.get("trendInfo")
-    if isinstance(ti, dict):
-        print(f"🧭 트렌딩 섹션: links={ti.get('links')}, y=({ti.get('top'):.1f}~{ti.get('bottom'):.1f})")
+    info = res.get("info", {}) or {}
+    print(f"🔎 전체 앵커: {info.get('anchors_total')}, 후보 카드: {res.get('candidateCount')}, 최종 채택: {res.get('picked')}")
+    if "top_orders" in info and isinstance(info["top_orders"], dict):
+        to = info["top_orders"]
+        print(f"🧭 Top Orders 섹션: links={to.get('links')}, y=({to.get('y_top'):.1f}~{to.get('y_bottom'):.1f})")
 
     items: List[Dict] = res.get("items", [])
     for r in items:
