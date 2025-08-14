@@ -47,10 +47,12 @@ def compute_diffs_and_blocks(df_today: pd.DataFrame, df_prev: Optional[pd.DataFr
     date_line = f"_기준: {get_kst_today_str()} (KST)_"
     blocks = [{"type":"section","text":{"type":"mrkdwn","text":f"{header}\n{date_line}"}}]
 
+    # Top10 – 한 줄 고정(의도적 개행 없음)
     t10 = df_today.nsmallest(10, "rank").copy().reset_index(drop=True)
     lines = []
     for i, r in t10.iterrows():
-        name = r.get("name",""); url = r.get("url","")
+        name = str(r.get("name","")).replace("\n"," ").strip()
+        url = r.get("url","")
         sale = r.get("sale_price"); ori = r.get("original_price"); disc = r.get("discount_pct")
         base = f"{i+1}. <{url}|{name}>"
         price_part = ""
@@ -70,13 +72,13 @@ def compute_diffs_and_blocks(df_today: pd.DataFrame, df_prev: Optional[pd.DataFr
         text = "\n".join(b["text"]["text"] for b in blocks if "text" in b)
         return blocks, text
 
-    # 이하 비교 섹션은 이전 버전 그대로
+    # 이하 비교 섹션은 동일
     kt, kp = df_today.copy(), df_prev.copy()
     kt["key"] = kt["url"].fillna("") + "||" + kt["brand"].fillna("") + "||" + kt["name"].fillna("")
     kp["key"] = kp["url"].fillna("") + "||" + kp["brand"].fillna("") + "||" + kp["name"].fillna("")
     merged = pd.merge(kt[["rank","key","name","url"]], kp[["rank","key"]], on="key", how="left", suffixes=("_today","_prev"))
     merged["rank_prev"] = merged["rank_prev"].astype("Int64")
-    movers = merged[merged["rank_prev"].notna()].copy()
+    movers = merged[merged["rank_prev"] .notna()].copy()
     movers["delta"] = (movers["rank_prev"] - movers["rank_today"]).astype(int)
 
     up10 = movers.sort_values("delta", ascending=False).head(10)
@@ -89,8 +91,7 @@ def compute_diffs_and_blocks(df_today: pd.DataFrame, df_prev: Optional[pd.DataFr
     today_top30["key"] = today_top30["url"].fillna("") + "||" + today_top30["brand"].fillna("") + "||" + today_top30["name"].fillna("")
     out_of_30 = prev_top30[~prev_top30["key"].isin(set(today_top30["key"]))].copy()
     out_lines = [f"- <{r['url']}|{r['name']}> {int(r['rank'])}위 → out" for _, r in out_of_30.iterrows()]
-    if not out_lines:
-        out_lines = ["_없음_"]
+    if not out_lines: out_lines = ["_없음_"]
 
     down5 = movers.sort_values("delta", ascending=True).head(5)
     down_lines = [f"- <{r['url']}|{r['name']}> {int(r['rank_prev'])}위 → {int(r['rank_today'])}위 (↓{abs(int(r['delta']))})" for _, r in down5.iterrows()]
@@ -104,36 +105,3 @@ def compute_diffs_and_blocks(df_today: pd.DataFrame, df_prev: Optional[pd.DataFr
 
     text = "\n".join(b["text"]["text"] for b in blocks if "text" in b)
     return blocks, text
-
-# ---- Google Drive OAuth 업로더 (변경 없음) ----
-def _oauth_token_from_refresh(client_id: str, client_secret: str, refresh_token: str) -> str:
-    r = requests.post(
-        "https://oauth2.googleapis.com/token",
-        data={"client_id":client_id,"client_secret":client_secret,"refresh_token":refresh_token,"grant_type":"refresh_token"},
-        timeout=30,
-    )
-    r.raise_for_status()
-    return r.json()["access_token"]
-
-def gdrive_upload_oauth(local_path: str, folder_id: str, client_id: str, client_secret: str, refresh_token: str):
-    if not os.path.exists(local_path):
-        print("[WARN] GDrive skip:", local_path); return
-    try:
-        token = _oauth_token_from_refresh(client_id, client_secret, refresh_token)
-        meta = {"name": os.path.basename(local_path), "parents": [folder_id]}
-        files = {
-            "metadata": ("metadata", json.dumps(meta), "application/json; charset=UTF-8"),
-            "file": (os.path.basename(local_path), open(local_path, "rb"), "text/csv"),
-        }
-        r = requests.post(
-            "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart",
-            headers={"Authorization": f"Bearer {token}"},
-            files=files,
-            timeout=60,
-        )
-        if r.status_code not in (200,201):
-            print("[WARN] Google Drive 업로드 실패:", r.status_code, r.text[:200])
-        else:
-            print("[INFO] Google Drive 업로드 성공. fileId:", r.json().get("id"))
-    except Exception as e:
-        print("[WARN] Google Drive 업로드 예외:", e)
