@@ -1,18 +1,16 @@
 # slack_notify.py
-import os
-import glob
-import re
-import requests
+import os, glob, re, requests
 from datetime import datetime, timezone, timedelta
 import pandas as pd
 
 DATA_DIR = "data"
 SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL", "")
 
+# 기준값
 RISE_TH = int(os.getenv("RISE_TH", "30"))     # 급상승 +30
 DROP_TH = -int(os.getenv("DROP_TH", "30"))    # 급하락 -30
 
-# ---------------- utils ----------------
+# ---------- utils ----------
 def kst_date_str():
     KST = timezone(timedelta(hours=9))
     return datetime.now(KST).strftime("%Y-%m-%d")
@@ -28,6 +26,7 @@ def load_csv(path):
     df = pd.read_csv(path)
     if "rank" in df.columns:
         df["rank"] = pd.to_numeric(df["rank"], errors="coerce")
+    # 할인율 컬럼이 없으면 계산
     if "discount_rate_pct" not in df.columns and \
        "price_current_usd" in df.columns and "price_original_usd" in df.columns:
         cur = pd.to_numeric(df["price_current_usd"], errors="coerce")
@@ -43,7 +42,7 @@ def fmt_money(v):
 def shorten(s, n=95):
     t = (str(s or "").replace("\n"," ").replace("\r"," ").strip())
     t = re.sub(r"\s+", " ", t)
-    return t if len(t) <= n else t[: n - 1] + "…"
+    return t if len(t) <= n else t[: n-1] + "…"
 
 def safe_label(text):
     if not text: return ""
@@ -55,34 +54,26 @@ def slack_link(url, label):
         return f"<{url}|{label}>"
     return label
 
-# 핵심: 상품명이 브랜드로 시작하면 브랜드를 다시 붙이지 않음(공백/구두점/대소문자 무시)
-def name_starts_with_brand(brand, name):
-    if not brand or not name: return False
-    # 브랜드의 공백을 느슨한 구분자 패턴으로 치환
-    brand_pat = re.escape(brand)
-    brand_pat = re.sub(r"\\\s+", r"[\\s\\-·|/]*", brand_pat)
-    regex = re.compile(r"^\s*" + brand_pat + r"\b", flags=re.I)
-    return bool(regex.search(name))
-
-def tidy_title(brand, name, url=None, maxlen=120):
-    brand = (brand or "").strip()
-    name  = (name or "").strip()
-    # 줄/공백 정리
-    brand = re.sub(r"\s+", " ", brand)
-    name  = re.sub(r"\s+", " ", name)
-    # 브랜드 중복 방지
-    if name_starts_with_brand(brand, name):
-        title = name  # 이미 브랜드로 시작 → 상품명만
+# product_name만 사용 (비었을 때만 brand로 대체)
+def title_from(row, prefer_today=True):
+    if prefer_today:
+        name = row.get("name_t") if "name_t" in row else row.get("product_name")
+        brand = row.get("brand_t") if "brand_t" in row else row.get("brand")
     else:
-        title = f"{brand} {name}".strip() if brand else name
-    title = shorten(title, maxlen)
+        name = row.get("name_p")
+        brand = row.get("brand_p")
+    title = (name or brand or "").strip()
+    title = re.sub(r"\s+", " ", title)
+    title = shorten(title, 120)
+    url = row.get("product_url")
     return slack_link(url, title)
 
-# ---------------- sections ----------------
+# ---------- sections ----------
 def build_top10(df):
     out = []
     for _, r in df.sort_values("rank").head(10).iterrows():
-        title = tidy_title(r.get("brand"), r.get("product_name"), r.get("product_url"))
+        # 타이틀은 product_name만!
+        title = title_from(r)
         price = fmt_money(r.get("price_current_usd"))
         ori   = fmt_money(r.get("price_original_usd"))
         disc  = r.get("discount_rate_pct")
@@ -113,28 +104,16 @@ def analyze(df_today, df_prev):
     inout_total = ins_cnt + outs_cnt
 
     def row_up(r):
-        title = tidy_title(r.get("brand_t") or r.get("brand_p"),
-                           r.get("name_t")  or r.get("name_p"),
-                           r.get("product_url"))
-        return f"- {title} {int(r['rank_prev'])}위 → {int(r['rank_today'])}위 (↑{int(r['delta'])})"
+        return f"- {title_from(r, True)} {int(r['rank_prev'])}위 → {int(r['rank_today'])}위 (↑{int(r['delta'])})"
 
     def row_down(r):
-        title = tidy_title(r.get("brand_t") or r.get("brand_p"),
-                           r.get("name_t")  or r.get("name_p"),
-                           r.get("product_url"))
-        return f"- {title} {int(r['rank_prev'])}위 → {int(r['rank_today'])}위 (↓{abs(int(r['delta']))})"
+        return f"- {title_from(r, True)} {int(r['rank_prev'])}위 → {int(r['rank_today'])}위 (↓{abs(int(r['delta']))})"
 
     def row_new(r):
-        title = tidy_title(r.get("brand_t") or r.get("brand_p"),
-                           r.get("name_t")  or r.get("name_p"),
-                           r.get("product_url"))
-        return f"- {title} NEW → {int(r['rank_today'])}위"
+        return f"- {title_from(r, True)} NEW → {int(r['rank_today'])}위"
 
     def row_out(r):
-        title = tidy_title(r.get("brand_t") or r.get("brand_p"),
-                           r.get("name_t")  or r.get("name_p"),
-                           r.get("product_url"))
-        return f"- {title} {int(r['rank_prev'])}위 → OUT"
+        return f"- {title_from(r, False)} {int(r['rank_prev'])}위 → OUT"
 
     lines_up   = [row_up(r)   for _, r in up.head(10).iterrows()]
     lines_new  = [row_new(r)  for _, r in newcomers.head(10).iterrows()]
@@ -154,12 +133,12 @@ def analyze(df_today, df_prev):
 
 def post_slack(text):
     if not SLACK_WEBHOOK_URL:
-        print("[WARN] SLACK_WEBHOOK_URL 미설정. 메시지 출력만 합니다.\n")
+        print("[WARN] SLACK_WEBHOOK_URL 미설정. 콘솔 출력만 합니다.\n")
         print(text); return
     resp = requests.post(SLACK_WEBHOOK_URL, json={"text": text}, timeout=15)
     resp.raise_for_status()
 
-# ---------------- main ----------------
+# ---------- main ----------
 def main():
     latest, prev = find_latest_prev()
     if not latest:
@@ -172,7 +151,6 @@ def main():
     if prev:
         df_prev = load_csv(prev)
         res = analyze(df_today, df_prev)
-
         parts = [header, top10]
         if res["up"]:
             parts.append("\n🥇 *급상승* (↑30 이상)")
