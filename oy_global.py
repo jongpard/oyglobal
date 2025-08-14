@@ -7,7 +7,6 @@ from utils import kst_today_str
 
 BEST_URL = "https://global.oliveyoung.com/display/page/best-seller?target=pillsTab1Nav1"
 
-# 페이지 안에서 카드들을 "보이는 그대로" 추출 (트렌딩 제외 안 함)
 JS_EXTRACT = r"""
 () => {
   const asNum = (s) => {
@@ -18,6 +17,33 @@ JS_EXTRACT = r"""
   };
   const inRange = (v) => typeof v === "number" && v >= 0.5 && v <= 500;
 
+  // -------- 트렌딩 섹션 컨테이너 정확 탐지 --------
+  let trendingContainer = null;
+  (function findTrendingContainer(){
+    const heads = Array.from(document.querySelectorAll("body *"))
+      .filter(el => /what.?s trending in korea/i.test((el.textContent || "").trim()));
+    if (!heads.length) return;
+
+    // 가장 위에 있는 헤더 기준
+    heads.sort((a,b)=>a.getBoundingClientRect().top - b.getBoundingClientRect().top);
+    const head = heads[0];
+
+    // 헤더에서 위로 올라가며 product/detail 링크를 '충분히' 포함하는 가장 가까운 조상 선택
+    const MIN_LINKS = 4;    // 섹션이라고 부를 최소 링크 수
+    const MAX_LINKS = 60;   // 너무 커지면 전체 페이지일 수 있으니 상한
+    let node = head;
+    for (let i=0; i<8 && node; i++, node = node.parentElement) {
+      const cnt = node.querySelectorAll("a[href*='product/detail']").length;
+      if (cnt >= MIN_LINKS && cnt <= MAX_LINKS) {
+        trendingContainer = node;
+        break;
+      }
+    }
+    // 못 찾으면 헤더 바로 위 컨테이너 시도
+    if (!trendingContainer) trendingContainer = head.closest("section,div,article") || head.parentElement || head;
+  })();
+
+  // -------- 베스트셀러 카드 스캔 --------
   const anchors = Array.from(document.querySelectorAll("a[href*='product/detail']"));
   const seen = new Set();
   const rows = [];
@@ -29,6 +55,10 @@ JS_EXTRACT = r"""
     if (seen.has(abs)) continue;
 
     const card = a.closest("li, article, .item, .unit, .prd_info, .product, .prod, .box, .list, .list_item") || a;
+
+    // 트렌딩 섹션 내부 카드는 제외
+    if (trendingContainer && trendingContainer.contains(card)) continue;
+
     const rect = card.getBoundingClientRect();
     const yAbs = rect.top + window.scrollY;
 
@@ -37,7 +67,7 @@ JS_EXTRACT = r"""
     const brandEl = card.querySelector('[class*="brand" i], strong.brand');
     if (brandEl) brand = (brandEl.textContent || "").trim();
 
-    // 상품명 (a title/aria → 명칭 셀렉터 → img alt → a 텍스트)
+    // 상품명
     let name = a.getAttribute("title") || a.getAttribute("aria-label") || "";
     if (!name || name.length < 3) {
       const nameEl = card.querySelector("p.name, .name, .prd_name, .product-name, strong.name");
@@ -65,18 +95,17 @@ JS_EXTRACT = r"""
     if (!priceText) priceText = (card.innerText || "").replace(/\s+/g," ");
 
     const amounts = [];
-
-    // (A) US$ 붙은 금액만 1차 채집
+    // (A) US$ 붙은 금액(우선)
     for (const m of priceText.matchAll(/US\$ ?([\d,]+(?:\.\d{2})?)/gi)) {
       const v = asNum(m[0]); if (v != null) amounts.push(v);
     }
-    // (B) A가 비어있을 때만, 소수 둘째자리 금액 보조 채집 (예: 28.49, 31.50)
+    // (B) A가 비어있을 때만, 소수 둘째자리 금액 보조
     if (amounts.length === 0) {
       for (const m of priceText.matchAll(/\b([\d,]+\.\d{2})\b/g)) {
         const v = asNum(m[0]); if (v != null) amounts.push(v);
       }
     }
-    // 정수 금액은 사용하지 않음(1+1, 97% 같은 오탐 방지)
+    // 정수 금액은 사용하지 않음
 
     // Value: US$xx.xx → 정가 힌트
     let valuePrice = null;
@@ -108,7 +137,20 @@ JS_EXTRACT = r"""
   rows.sort((a, b) => a.y - b.y);
   const items = rows.slice(0, 100).map((r, i) => ({ rank: i + 1, ...r }));
 
-  return { anchorCount: anchors.length, candidateCount: rows.length, picked: items.length, items };
+  // 디버그: 트렌딩 컨테이너 대략 정보
+  let trendInfo = null;
+  if (trendingContainer) {
+    const r = trendingContainer.getBoundingClientRect();
+    trendInfo = { top: r.top + window.scrollY, bottom: r.bottom + window.scrollY, links: trendingContainer.querySelectorAll("a[href*='product/detail']").length };
+  }
+
+  return {
+    anchorCount: anchors.length,
+    candidateCount: rows.length,
+    picked: items.length,
+    trendInfo,
+    items
+  };
 }
 """
 
@@ -142,6 +184,9 @@ async def scrape_oliveyoung_global() -> List[Dict]:
         await context.close()
 
     print(f"🔎 앵커 수: {res.get('anchorCount')}, 후보 카드: {res.get('candidateCount')}, 최종 채택: {res.get('picked')}")
+    ti = res.get("trendInfo")
+    if isinstance(ti, dict):
+        print(f"🧭 트렌딩 섹션: links={ti.get('links')}, y=({ti.get('top'):.1f}~{ti.get('bottom'):.1f})")
 
     items: List[Dict] = res.get("items", [])
     for r in items:
