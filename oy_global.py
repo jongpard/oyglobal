@@ -28,8 +28,8 @@ async def _autoscroll_collect(page: Page, need: int = 100, pause_ms: int = 350) 
     - '트렌딩' 섹션을 구분하지 않고, **100개 모이면 즉시 중단** → 트렌딩 포함 방지.
     - 카드 컨테이너에서 브랜드/상품/가격을 파싱.
     """
-    # 최초 대기
-    await page.wait_for_selector("a[href*='product/detail']", timeout=30000)
+    # ✅ 가시성(visible) 대신 DOM 부착(attached)만 보장해서 첫 요소가 안 보이는 경우 타임아웃 방지
+    await page.wait_for_selector("a[href*='product/detail']", state="attached", timeout=30000)
 
     seen_hrefs = set()
     items: List[Dict] = []
@@ -42,7 +42,6 @@ async def _autoscroll_collect(page: Page, need: int = 100, pause_ms: int = 350) 
         href = href.strip()
 
         # 카드 컨테이너(상위 li/div) 추정
-        # - 사이트가 자주 바뀌어도 최대한 보수적으로 탐색
         container = anchor.locator("xpath=ancestor::li[1]")
         if not await container.count():
             container = anchor.locator("xpath=ancestor::div[1]")
@@ -60,7 +59,6 @@ async def _autoscroll_collect(page: Page, need: int = 100, pause_ms: int = 350) 
         product_name = (await anchor.inner_text()).strip()
 
         # 브랜드: 카드 내의 a 중 product/detail이 **아닌** 것들 중 첫 a 텍스트를 사용
-        # (없으면 product_name이 브랜드를 포함하므로 빈칸으로 두지 않고 추정 시도)
         brand = ""
         try:
             brand_links = container.locator("a:not([href*='product/detail'])")
@@ -94,8 +92,6 @@ async def _autoscroll_collect(page: Page, need: int = 100, pause_ms: int = 350) 
         price_original = 0.0
 
         if value_price > 0 and len(nums) >= 1:
-            # Value 가격이 있는 경우 → 현재가 + value_price를 정가로 사용
-            # 일반적으로 첫 번째 숫자가 현재가인 케이스가 가장 많음
             price_current = nums[0]
             price_original = value_price
         elif len(nums) >= 2:
@@ -103,9 +99,8 @@ async def _autoscroll_collect(page: Page, need: int = 100, pause_ms: int = 350) 
             price_original, price_current = nums[0], nums[1]
         elif len(nums) == 1:
             price_current = nums[0]
-            price_original = price_current  # 할인 없음
+            price_original = price_current
         else:
-            # 금액 못 찾으면 스킵
             return {}
 
         # discount
@@ -181,17 +176,13 @@ async def scrape_oliveyoung_global() -> List[Dict]:
         browser = await p.chromium.launch(headless=True)
         page = await browser.new_page()
         await page.goto(url, wait_until="networkidle")
-        # 혹시나 로딩 지연 대비 약간의 여유
         await page.wait_for_timeout(1000)
 
         data = await _autoscroll_collect(page, need=100)
 
         # 최종 정돈 + rank, date_kst 부여
         for idx, row in enumerate(data, start=1):
-            # 브랜드 보정: product_name 시작에 브랜드가 포함되더라도
-            # CSV의 brand에는 **브랜드만** 들어가도록 두고, product_name은 제목 그대로 둔다.
             brand = (row.get("brand") or "").strip()
-            # 너무 긴 이상치/공백이면 비워둠
             if len(brand) > 40:
                 brand = ""
             row["brand"] = brand
@@ -224,7 +215,6 @@ def save_to_csv(rows: List[Dict]) -> str:
     return out
 
 
-# 로컬 테스트 용
 if __name__ == "__main__":
     async def _run():
         rows = await scrape_oliveyoung_global()
