@@ -1,67 +1,45 @@
-import os
-import csv
+# -*- coding: utf-8 -*-
 import json
-from datetime import datetime, timezone, timedelta
-import urllib.request
+import requests
+import pandas as pd
 
-KST = timezone(timedelta(hours=9))
+def _fmt_price(cur, org):
+    if cur is None:
+        return "US$0.00"
+    s_cur = f"US${cur:.2f}"
+    if org and org > cur:
+        return f"{s_cur} (정가 US${org:.2f})"
+    return s_cur
 
-def fmt_price(v):
+def _fmt_discount(pct):
+    if pct is None:
+        return ""
+    return f"(↓{pct:.2f}%)"
+
+def _mk_line(idx, row):
+    text = f"<{row['product_url']}|{row['brand']} {row['product_name']}>"
+    price = _fmt_price(row["price_current_usd"], row["price_original_usd"])
+    disc = _fmt_discount(row["discount_rate_pct"])
+    return f"{idx}. {text} – {price} {disc}"
+
+def post_top10_to_slack(webhook_url: str, df_top10: pd.DataFrame) -> bool:
+    need_cols = {"brand","product_name","price_current_usd","price_original_usd",
+                 "discount_rate_pct","product_url","date_kst"}
+    if not need_cols.issubset(set(df_top10.columns)):
+        return False
+
+    lines = [f"*올리브영 글로벌 전체 랭킹 ({df_top10.iloc[0]['date_kst']})*", "*TOP 10*"]
+    for i, (_, r) in enumerate(df_top10.iterrows(), start=1):
+        lines.append(_mk_line(i, r))
+
+    payload = {"text": "\n".join(lines)}
     try:
-        n = float(v)
-        return f"US${n:,.2f}"
-    except:
-        return "-"
-
-def build_message(csv_path: str) -> str:
-    rows = []
-    with open(csv_path, newline="", encoding="utf-8") as f:
-        r = csv.DictReader(f)
-        for row in r:
-            rows.append(row)
-
-    rows = sorted(rows, key=lambda x: int(x["rank"]))[:10]
-
-    date_str = datetime.now(KST).strftime("%Y-%m-%d %H:%M (KST)")
-    lines = [f"*올리브영 글로벌 전체 랭킹* ({date_str})", "", "*TOP 10*"]
-    for r in rows:
-        rank = r["rank"]
-        name = r["product_name"].strip()  # ✅ 상품명만 사용
-        url = r["product_url"]
-        cur = fmt_price(r["price_current_usd"])
-        org = fmt_price(r["price_original_usd"])
-        try:
-            disc = float(r.get("discount_rate_pct") or 0.0)
-        except:
-            disc = 0.0
-        disc_str = f"(↓{disc:.2f}%)" if disc > 0 else ""
-
-        # 하이퍼링크는 상품명만
-        line = f"{rank}. <{url}|{name}> – {cur} (정가 {org}) {disc_str}".rstrip()
-        lines.append(line)
-
-    lines.append("")
-    lines.append("_(첫 실행이어서 비교 기준이 없습니다.)_")
-    return "\n".join(lines)
-
-def send_to_slack(text: str, webhook_url: str):
-    data = json.dumps({"text": text}).encode("utf-8")
-    req = urllib.request.Request(
-        webhook_url,
-        data=data,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    with urllib.request.urlopen(req) as resp:
-        resp.read()
-
-if __name__ == "__main__":
-    csv_path = os.environ.get("CSV_PATH", "")
-    webhook = os.environ.get("SLACK_WEBHOOK_URL", "")
-    if not csv_path or not webhook:
-        print("CSV_PATH / SLACK_WEBHOOK_URL 둘 다 필요합니다.")
-        raise SystemExit(1)
-
-    msg = build_message(csv_path)
-    send_to_slack(msg, webhook)
-    print("✅ Sent Slack message.")
+        resp = requests.post(
+            webhook_url,
+            data=json.dumps(payload),
+            headers={"Content-Type": "application/json"},
+            timeout=10,
+        )
+        return resp.status_code // 100 == 2
+    except Exception:
+        return False
