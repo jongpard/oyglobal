@@ -1,68 +1,61 @@
-# -*- coding: utf-8 -*-
-from __future__ import annotations
 import os
-import csv
-from datetime import datetime, timezone, timedelta
-from typing import List, Dict
+import sys
+import traceback
+from utils import (
+    get_kst_today_str, ensure_dirs, load_previous_csv, save_today_csv,
+    compute_diffs_and_blocks, dropbox_upload_optional
+)
+from oy_global import scrape_oy_global_us
+from slack_notify import post_slack_message
 
-from oy_global import scrape_oliveyoung_global
-from slack_notify import post_top10_to_slack
+def main():
+    ensure_dirs()
+    today_str = get_kst_today_str()
+    today_csv = f"data/{today_str}_global.csv"
 
-KST = timezone(timedelta(hours=9))
+    try:
+        df_today = scrape_oy_global_us(debug=os.getenv("OY_DEBUG") == "1")
+        if df_today is None or df_today.empty:
+            raise RuntimeError("크롤링 결과가 비어 있습니다. 셀렉터/구조 변경 가능성 확인 필요")
 
+        # 저장
+        save_today_csv(df_today, today_csv)
 
-def _today_kst() -> str:
-    return datetime.now(KST).strftime("%Y-%m-%d")
+        # 전일 로드
+        df_prev, prev_path = load_previous_csv(today_csv)
 
+        # 비교 & 슬랙 블록 생성
+        blocks, text = compute_diffs_and_blocks(df_today, df_prev, prev_path)
 
-def _save_csv(rows: List[Dict]) -> str:
-    date_str = _today_kst()
-    os.makedirs("data", exist_ok=True)
-    path = f"data/oliveyoung_global_{date_str}.csv"
+        # 슬랙 전송
+        webhook = os.getenv("SLACK_WEBHOOK_URL", "").strip()
+        if webhook:
+            post_slack_message(webhook, blocks, fallback_text=text)
+        else:
+            print("[WARN] SLACK_WEBHOOK_URL이 없어 슬랙 전송을 건너뜁니다.")
 
-    # 컬럼 고정(브랜드/제품명 분리, 할인율 정수, 링크 & 이미지 포함)
-    fields = [
-        "date_kst",
-        "rank",
-        "brand",
-        "product_name",
-        "price_current_usd",
-        "price_original_usd",
-        "discount_rate_pct",
-        "has_value_price",
-        "product_url",
-        "image_url",
-    ]
+        # (선택) Dropbox 업로드
+        dropbox_token = os.getenv("DROPBOX_ACCESS_TOKEN", "").strip()
+        if dropbox_token:
+            dropbox_upload_optional(dropbox_token, today_csv, f"/oyglobal/{os.path.basename(today_csv)}")
 
-    for r in rows:
-        r["date_kst"] = date_str
-        # 안전 가드
-        r["discount_rate_pct"] = int(r.get("discount_rate_pct") or 0)
+        print("✅ 완료")
 
-    with open(path, "w", newline="", encoding="utf-8") as f:
-        wr = csv.DictWriter(f, fieldnames=fields)
-        wr.writeheader()
-        for r in rows:
-            wr.writerow({k: r.get(k, "") for k in fields})
-
-    print(f"📁 저장 완료: {path}")
-    # 첫 10줄 프리뷰
-    for r in rows[:10]:
-        print(r["rank"], r["brand"], r["product_name"], r["price_current_usd"], r["price_original_usd"])
-    return path
-
-
-async def run() -> None:
-    print("🔎 올리브영 글로벌몰 베스트 셀러 수집 시작")
-    items = await scrape_oliveyoung_global()  # List[dict] (최대 100)
-    if not items:
-        print("⚠️ 수집 결과가 비어있습니다.")
-        return
-    csv_path = _save_csv(items)
-    # 슬랙(있으면 전송)
-    post_top10_to_slack(csv_path)
-
+    except Exception as e:
+        print("❌ 실패:", e)
+        traceback.print_exc()
+        # 실패 상황에서도 (가능하면) 슬랙 알림
+        webhook = os.getenv("SLACK_WEBHOOK_URL", "").strip()
+        if webhook:
+            post_slack_message(
+                webhook,
+                blocks=[{
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": f"*OY Global 크롤링 실패*\n```{str(e)}```"}
+                }],
+                fallback_text=f"OY Global 크롤링 실패: {str(e)}"
+            )
+        sys.exit(1)
 
 if __name__ == "__main__":
-    import asyncio
-    asyncio.run(run())
+    main()
