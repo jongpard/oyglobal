@@ -10,9 +10,6 @@ BEST_URL = "https://global.oliveyoung.com/display/page/best-seller?target=pillsT
 
 async def _new_context(pw) -> BrowserContext:
     browser = await pw.chromium.launch(headless=True)
-    context = await pw.chromium.launch(headless=True)
-    # 위 한 줄 오타 방지: 실제 context는 아래에서 생성
-    browser = await pw.chromium.launch(headless=True)
     context = await browser.new_context(
         user_agent=(
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -45,28 +42,6 @@ async def _wait_attached(page, selector, timeout=15000) -> bool:
     except:
         return False
 
-async def _get_trending_boundary_y(page) -> float:
-    # 'What's trending in Korea?' 헤더의 Y좌표. 찾지 못하면 매우 큰 값 반환(=컷 안함)
-    try:
-        loc = page.get_by_text("What's trending in Korea?").first
-        bb = await loc.bounding_box()
-        if bb:
-            return bb["y"]
-    except:
-        pass
-    try:
-        loc = page.get_by_text("What’s trending in Korea?").first  # 곡선 아포스트로피
-        bb = await loc.bounding_box()
-        if bb:
-            return bb["y"]
-    except:
-        pass
-    return 1e12
-
-def _extract_prdtno(url: str) -> str:
-    m = re.search(r"prdtNo=([A-Za-z0-9]+)", url)
-    return m.group(1) if m else ""
-
 async def _gather_price_blob(card_handle) -> str:
     """카드 요소의 텍스트/HTML/모든 자식 속성값을 긁어서 하나의 문자열로 반환."""
     try:
@@ -91,11 +66,22 @@ async def _gather_price_blob(card_handle) -> str:
             }"""
         )
     except:
-        # 실패 시 텍스트만
         try:
             return await card_handle.evaluate("(el)=> (el.innerText||'') + ' ' + (el.innerHTML||'')")
         except:
             return ""
+
+def _first_big_gap_cutoff(sorted_y: List[float], min_gap: float = 140.0) -> float:
+    """
+    y좌표를 정렬한 뒤, 인접한 항목 간 '큰 갭'을 찾아
+    그 다음 y를 컷오프로 반환. 없으면 아주 큰 값 반환.
+    """
+    if len(sorted_y) < 2:
+        return 1e12
+    for i in range(len(sorted_y) - 1):
+        if sorted_y[i+1] - sorted_y[i] >= min_gap:
+            return sorted_y[i+1]
+    return 1e12
 
 async def scrape_oliveyoung_global() -> List[Dict]:
     async with async_playwright() as pw:
@@ -106,56 +92,53 @@ async def scrape_oliveyoung_global() -> List[Dict]:
         await _try_close_overlays(page)
         await page.wait_for_load_state("networkidle")
 
-        # 루트 찾기(있으면)
-        root = None
-        for sel in ["#pillsTab1Nav1", "[id*='pillsTab1']", "section [data-list='best-seller']"]:
-            if await _wait_attached(page, sel, timeout=7000):
-                root = sel
-                break
-
         # 제품 링크 DOM 부착 대기
-        await _wait_attached(page, "a[href*='product/detail']", timeout=15000)
+        await _wait_attached(page, "a[href*='product/detail']", timeout=20000)
 
-        # 충분히 스크롤 (지연 로딩 대비)
+        # 지연 로딩 대비 충분히 스크롤
         for _ in range(14):
             await page.mouse.wheel(0, 2800)
             await asyncio.sleep(0.9)
 
-        trending_y = await _get_trending_boundary_y(page)
-        scope_prefix = f"{root} " if root else ""
-        links = await page.query_selector_all(f"{scope_prefix}a[href*='product/detail']")
-
-        # 링크 정리: 트렌딩 섹션 위쪽만, y 오름차순, URL 중복 제거
-        link_info: List[Tuple[float, str, object]] = []
-        for a in links:
+        # 페이지 내 모든 제품 링크 수집
+        all_links = await page.query_selector_all("a[href*='product/detail']")
+        link_triplets: List[Tuple[float, str, object]] = []
+        for a in all_links:
             try:
                 bb = await a.bounding_box()
-                if bb and bb["y"] >= trending_y:
-                    continue  # 트렌딩 이하 컷
+                if not bb:
+                    continue
                 href = await a.get_attribute("href")
                 if not href:
                     continue
                 url = href if href.startswith("http") else f"https://global.oliveyoung.com{href}"
-                link_info.append((bb["y"] if bb else 0.0, url, a))
+                link_triplets.append((bb["y"], url, a))
             except:
                 continue
 
-        link_info.sort(key=lambda t: t[0])
-        unique_urls = []
+        # y 오름차순 정렬
+        link_triplets.sort(key=lambda t: t[0])
+        ys = [y for y, _, _ in link_triplets]
+        cutoff_y = _first_big_gap_cutoff(ys, min_gap=140.0)  # 첫 큰 갭 기준으로 상단/하단 분리
+
+        # 상단(=베스트 셀러 영역)만 선택
+        top_links: List[Tuple[str, object]] = []
         seen = set()
-        for _, url, a in link_info:
+        for y, url, a in link_triplets:
+            if y >= cutoff_y:
+                break
             if url in seen:
                 continue
             seen.add(url)
-            unique_urls.append((url, a))
+            top_links.append((url, a))
 
-        print(f"🔎 링크(트렌딩 위) 감지: {len(unique_urls)}개")
+        print(f"🔎 링크 전체: {len(link_triplets)}개, 상단 선택: {len(top_links)}개, 컷오프 y={cutoff_y:.1f}")
 
         items: List[Dict] = []
         rank = 0
         parsed_ok = 0
 
-        for url, a in unique_urls:
+        for url, a in top_links:
             try:
                 # 근접 카드 컨테이너
                 card = await a.evaluate_handle("el => el.closest('li,div,article') || el")
