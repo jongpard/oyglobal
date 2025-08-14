@@ -51,7 +51,7 @@ def compute_diffs_and_blocks(df_today: pd.DataFrame, df_prev: Optional[pd.DataFr
     date_line = f"_기준: {get_kst_today_str()} (KST)_"
     blocks = [{"type":"section","text":{"type":"mrkdwn","text":f"{header}\n{date_line}"}}]
 
-    # --- Top10 (국내몰 동일 포맷) ---
+    # --- Top10: 번호 매김 + 제품명만 노출 ---
     t10 = df_today.nsmallest(10, "rank").copy().reset_index(drop=True)
     lines = []
     for i, r in t10.iterrows():
@@ -109,7 +109,7 @@ def compute_diffs_and_blocks(df_today: pd.DataFrame, df_prev: Optional[pd.DataFr
     text = "\n".join(b["text"]["text"] for b in blocks if "text" in b)
     return blocks, text
 
-# ---- Google Drive OAuth 업로더 ----
+# ---- Google Drive OAuth 업로더 (변경 없음) ----
 def _oauth_token_from_refresh(client_id: str, client_secret: str, refresh_token: str) -> str:
     r = requests.post(
         "https://oauth2.googleapis.com/token",
