@@ -22,9 +22,9 @@ NAME_SELECTORS  = [
 BRAND_SELECTORS = [
     '.brand','.prod-brand','.brand-name','[data-brand-name]',
     '.badge.brand','.flag-brand','em.brand','strong.brand',
-    'span[class*="brand"]','div[class*="brand"]','p[class*="brand"]'
+    'span[class*="brand"]','div[class*="brand"]','p[class*="brand"]',
+    'a[class*="brand"]','a[href*="/brand/"]'
 ]
-# 가격 블록/클래스 후보
 PRICE_WRAP_SELECTORS = ['.price','.prod-price','.price-area','.cost','.amount']
 
 DEBUG_DIR = "data/debug"
@@ -37,7 +37,11 @@ DENY_RE  = re.compile(
 )
 ONCLICK_DETAIL_RE = re.compile(r"""['"](?P<url>/(?:product|goods)[^'"]+)['"]""")
 
-NON_BRAND_TOKENS = {"SET","TRIPLE","DUO","TWIN","GIFT","1+1","2+1","3+1","EDITION","POKEMON"}
+# 브랜드로 오인되기 쉬운 키워드(대괄호/괄호 안 텍스트 걸러내기)
+NON_BRAND_WORD_RE = re.compile(
+    r'(set|twin\s*pack|pack|types?|refill|supply|gift|edition|exclusive|collab|special|cream|ml|ea|pcs?)',
+    re.I
+)
 
 def _ensure_debug_dirs():
     os.makedirs(DEBUG_DIR, exist_ok=True)
@@ -59,68 +63,54 @@ def _text_from_attrs(tag) -> str:
             return tag[a].strip()
     return ""
 
+def _clean_spaces(s: str) -> str:
+    return re.sub(r'\s+', ' ', s or '').strip()
+
 def _extract_name(card) -> str:
     for sel in NAME_SELECTORS:
         t = card.select_one(sel)
         if t:
-            txt = (t.get_text(strip=True) or _text_from_attrs(t) or t.get("alt","").strip())
+            txt = t.get_text(" ", strip=True) or _text_from_attrs(t) or t.get("alt","")
+            txt = _clean_spaces(txt)
             if txt: return txt
-    raw = card.get_text("\n", strip=True)
-    if raw:
-        parts = [p for p in (s.strip() for s in raw.split("\n")) if p]
-        parts.sort(key=len, reverse=True)
-        return parts[0] if parts else ""
+    raw = _clean_spaces(card.get_text(" ", strip=True))
+    return raw
+
+def _brand_from_badge(card) -> str:
+    # 클래스명에 brand 포함된 모든 엘리먼트 탐색
+    for el in card.find_all(True, recursive=True):
+        classes = " ".join(el.get("class", [])).lower()
+        if "brand" in classes:
+            txt = _clean_spaces(el.get_text(" ", strip=True))
+            if txt and not NON_BRAND_WORD_RE.search(txt):
+                return txt
+    # 셀렉터 직접 조회 (보수)
+    for sel in BRAND_SELECTORS:
+        el = card.select_one(sel)
+        if el:
+            txt = _clean_spaces(el.get_text(" ", strip=True) or _text_from_attrs(el))
+            if txt and not NON_BRAND_WORD_RE.search(txt):
+                return txt
+    return ""
+
+def _brand_from_name_fallback(name_after: str) -> str:
+    # [브랜드] ... / (...) 꼬리에서 브랜드 후보 뽑기 (금지어 포함시 버림)
+    in_brackets = re.findall(r'\[([^\]]+)\]', name_after) + re.findall(r'\(([^\)]+)\)', name_after)
+    for cand in reversed(in_brackets):  # 뒤에서부터(브랜드가 뒤에 오는 케이스 우선)
+        cand = _clean_spaces(cand)
+        if cand and not NON_BRAND_WORD_RE.search(cand) and len(cand) <= 30:
+            return cand
+    # 첫 토큰이 브랜드일 가능성 (예: VT, AHC, numbuzin)
+    first = (name_after.split() or [""])[0]
+    if re.fullmatch(r"[A-Za-z][A-Za-z0-9\.\-&']{1,20}", first):
+        return first
     return ""
 
 def _extract_brand(card, name_after: str) -> str:
-    # 1) 카드에서 브랜드 라벨 찾기 (가장 신뢰)
-    for sel in BRAND_SELECTORS:
-        t = card.select_one(sel)
-        if t:
-            txt = (t.get_text(strip=True) or _text_from_attrs(t)).strip()
-            if txt: return txt
-
-    # 2) [브랜드] 제품명 패턴
-    m = re.match(r"^\s*\[(?P<b>[^]]+)\]\s*(?P<n>.+)$", name_after)
-    if m:
-        b = m.group("b").strip()
-        token = b.upper().replace(" ", "")
-        if token not in NON_BRAND_TOKENS:
-            return b
-
-    # 3) 대괄호/괄호 안의 마지막 토큰을 브랜드로 추정 (Set류 키워드 제외)
-    for rgx in [r".*\[(?P<b>[^]]+)\]\s*$", r".*\((?P<b>[^)]+)\)\s*$"]:
-        m2 = re.match(rgx, name_after)
-        if m2:
-            cand = m2.group("b").strip()
-            token = cand.upper().replace(" ", "")
-            if token not in NON_BRAND_TOKENS and len(cand) <= 20:
-                return cand
-
-    # 4) 첫 토큰이 대문자/약어 계열이면 브랜드로 추정 (예: VT, AHC)
-    tok = name_after.split()[0] if name_after else ""
-    if 1 <= len(tok) <= 12 and re.fullmatch(r"[A-Z0-9&\-\+\.]+", tok):
-        return tok
-
-    return ""
-
-def _extract_link(card) -> str:
-    # a[href]/onclick/data-*에서 상세 URL 복원
-    for a in card.select('a[href], a[onclick]'):
-        href = a.get("href","").strip()
-        if href and "javascript" not in href:
-            h = _normalize_href(href)
-            if _is_product_link(h): return h
-        oc = _normalize_href(_recover_href_from_onclick(a))
-        if _is_product_link(oc): return oc
-        for k in ["data-url","data-href","data-link","data-detail-url","data-product-url"]:
-            if a.has_attr(k) and a[k]:
-                h = _normalize_href(a[k])
-                if _is_product_link(h): return h
-    # 카드 루트 data-*
-    h2 = _normalize_href(_recover_href_from_data(card))
-    if _is_product_link(h2): return h2
-    return ""
+    b = _brand_from_badge(card)
+    if b: return b
+    b = _brand_from_name_fallback(name_after)
+    return b or ""
 
 def _recover_href_from_onclick(tag) -> str:
     oc = tag.get("onclick","")
@@ -134,17 +124,34 @@ def _recover_href_from_data(el) -> str:
         if el.has_attr(a) and el[a]: return f"/product/detail?prdNo={el[a]}"
     return ""
 
+def _extract_link(card) -> str:
+    for a in card.select('a[href], a[onclick]'):
+        href = a.get("href","").strip()
+        if href and "javascript" not in href:
+            h = _normalize_href(href)
+            if _is_product_link(h): return h
+        oc = _normalize_href(_recover_href_from_onclick(a))
+        if _is_product_link(oc): return oc
+        for k in ["data-url","data-href","data-link","data-detail-url","data-product-url"]:
+            if a.has_attr(k) and a[k]:
+                h = _normalize_href(a[k])
+                if _is_product_link(h): return h
+    h2 = _normalize_href(_recover_href_from_data(card))
+    if _is_product_link(h2): return h2
+    return ""
+
 # ---- 가격 추출 (정가/할인가 분리) ----
 _PRICE_CLASS_HINT = re.compile(r"(sale|final|now|current|sell|price|pay|cost)", re.I)
 
 def _extract_prices(card) -> (Optional[float], Optional[float]):
-    # 1) 명시적 정가(del 등)
+    # 가격 블록
     wrap = None
     for s in PRICE_WRAP_SELECTORS:
         wrap = card.select_one(s)
         if wrap: break
     target = wrap or card
 
+    # 1) 명시적 정가(del 등)
     original = None
     strike = target.select_one('del, .origin, .original, .strike, .price-origin, .consumer, .normal-price')
     if strike:
@@ -152,37 +159,33 @@ def _extract_prices(card) -> (Optional[float], Optional[float]):
 
     # 2) 할인가: class 힌트를 가진 노드 중 del 아닌 곳
     sale = None
-    candidates = []
+    sale_cands = []
     for t in target.find_all(True):
         if t.name in ("script","style"): continue
-        cls = " ".join(t.get("class", [])).lower()
-        if _PRICE_CLASS_HINT.search(cls):
-            txt = t.get_text(" ", strip=True)
-            val = parse_price(txt)
-            if val is not None and t.name != "del":
-                candidates.append(val)
-    if candidates:
-        # 할인가가 보통 더 작음
-        sale = min(candidates)
-
-    # 3) 둘 중 하나라도 빈 경우 → 텍스트에서 가격 후보 2개를 찾아 보정
-    if sale is None or original is None:
-        allnums = []
-        for t in target.find_all(True):
-            if t.name in ("script","style","del"): continue
-            txt = t.get_text(" ", strip=True)
-            val = parse_price(txt)
+        classes = " ".join(t.get("class", [])).lower()
+        if _PRICE_CLASS_HINT.search(classes) and t.name != "del":
+            val = parse_price(t.get_text(" ", strip=True))
             if val is not None:
-                allnums.append(val)
-        allnums = [v for v in allnums if v > 0]
-        if len(allnums) >= 2:
-            low, high = min(allnums), max(allnums)
-            # 보정: sale <= original 이 되도록
-            sale = low if sale is None else sale
-            original = high if original is None else original
-        elif len(allnums) == 1:
-            # 하나만 보이면 그게 할인가일 가능성이 큼
-            sale = allnums[0] if sale is None else sale
+                sale_cands.append(val)
+    if sale_cands:
+        sale = min(sale_cands)
+
+    # 3) 후보 보정: 텍스트 전체에서 수치 모으기
+    nums = []
+    for t in target.find_all(True):
+        if t.name in ("script","style"): continue
+        txt = t.get_text(" ", strip=True)
+        v = parse_price(txt)
+        if v is not None:
+            nums.append(v)
+    nums = [v for v in nums if v > 0]
+    if (sale is None or original is None) and nums:
+        if len(nums) >= 2:
+            lo, hi = min(nums), max(nums)
+            sale = lo if sale is None else sale
+            original = hi if original is None else original
+        elif len(nums) == 1:
+            sale = nums[0] if sale is None else sale
 
     # 순서 보정
     if sale and original and sale > original:
@@ -191,7 +194,7 @@ def _extract_prices(card) -> (Optional[float], Optional[float]):
     return sale, original
 
 def _calc_discount(sale: Optional[float], original: Optional[float]) -> Optional[float]:
-    if sale and original and original > 0 and sale <= original:
+    if sale and original and original > 0 and sale <= original - 1e-6:
         return round((original - sale) / original * 100, 2)
     return None
 
@@ -230,6 +233,7 @@ async def _harvest_from_dom(html: str) -> pd.DataFrame:
 
     for card in cards:
         raw_name = _extract_name(card)
+        raw_name = _clean_spaces(raw_name)
         link = _extract_link(card)
         if not _is_product_link(link): continue
         brand = _extract_brand(card, raw_name)
@@ -294,21 +298,19 @@ def _harvest_from_json_payloads(payloads: List[Dict[str, Any]]) -> Optional[pd.D
                 for k in ["salePrice","price","saleAmt","finalPrice","goodsPrice","sale_price"]:
                     n = _num(prod.get(k))
                     if n is not None:
-                        sale = n
-                        break
+                        sale = n; break
 
                 ori = None
                 for k in ["originPrice","listPrice","originalPrice","marketPrice","ori_price"]:
                     n = _num(prod.get(k))
                     if n is not None:
-                        ori = n
-                        break
+                        ori = n; break
 
                 disc = round((ori-sale)/ori*100, 2) if sale and ori and ori>0 and sale<=ori else None
                 rows.append({
-                    "rank": i, "brand": brand, "name": name,
+                    "rank": i, "brand": brand, "name": _clean_spaces(name),
                     "original_price": ori, "sale_price": sale, "discount_pct": disc,
-                    "url": url, "raw_name": name
+                    "url": url, "raw_name": _clean_spaces(name)
                 })
     if not rows: return None
     df = pd.DataFrame(rows)
@@ -403,12 +405,11 @@ async def _scrape_impl(debug=False) -> pd.DataFrame:
 
         df = df_json if (df_json is not None and not df_json.empty) else (df_dom if df_dom is not None else pd.DataFrame([]))
         if not df.empty:
-            # 최종 컬럼 정렬 (국내몰과 동일)
-            want_cols = ["rank","brand","name","original_price","sale_price","discount_pct","url","raw_name"]
-            for c in want_cols:
-                if c not in df.columns:
-                    df[c] = pd.NA
-            df = df[want_cols].copy()
+            # 최종 컬럼 고정 (국내몰과 동일)
+            want = ["rank","brand","name","original_price","sale_price","discount_pct","url","raw_name"]
+            for c in want:
+                if c not in df.columns: df[c] = pd.NA
+            df = df[want].copy()
             df["rank"] = range(1, len(df)+1)
             for c in ["brand","name","url","raw_name"]:
                 df[c] = df[c].fillna("").astype(str)
