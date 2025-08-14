@@ -9,11 +9,10 @@ import pandas as pd
 DATA_DIR = "data"
 SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL", "")
 
-# 기준값
-RISE_TH = int(os.getenv("RISE_TH", "30"))      # 급상승 +30
-DROP_TH = -int(os.getenv("DROP_TH", "30"))     # 급하락 -30
+RISE_TH = int(os.getenv("RISE_TH", "30"))     # 급상승 +30
+DROP_TH = -int(os.getenv("DROP_TH", "30"))    # 급하락 -30
 
-# ------------------ 유틸 ------------------
+# ---------------- utils ----------------
 def kst_date_str():
     KST = timezone(timedelta(hours=9))
     return datetime.now(KST).strftime("%Y-%m-%d")
@@ -29,7 +28,6 @@ def load_csv(path):
     df = pd.read_csv(path)
     if "rank" in df.columns:
         df["rank"] = pd.to_numeric(df["rank"], errors="coerce")
-    # 안전망: 할인율 없을 때 계산
     if "discount_rate_pct" not in df.columns and \
        "price_current_usd" in df.columns and "price_original_usd" in df.columns:
         cur = pd.to_numeric(df["price_current_usd"], errors="coerce")
@@ -43,57 +41,59 @@ def fmt_money(v):
     except Exception: return f"US${v}"
 
 def shorten(s, n=95):
-    t = (str(s or "").replace("\n", " ").replace("\r", " ").strip())
+    t = (str(s or "").replace("\n"," ").replace("\r"," ").strip())
     t = re.sub(r"\s+", " ", t)
     return t if len(t) <= n else t[: n - 1] + "…"
 
-def clean_brand_name(brand, name):
-    """상품명이 브랜드로 시작하면 중복 브랜드 제거"""
-    b = (brand or "").strip()
-    n = (name or "").strip()
-    if not b: return n
-    prefix = re.sub(r"[^a-z0-9]+", "", b.lower())
-    head   = re.sub(r"[^a-z0-9]+", "", n.lower())[:len(prefix)]
-    if prefix and head == prefix:
-        return n[len(b):].lstrip(" -–—·|/")
-    return n
-
-def tidy_title(brand, name, maxlen=120):
-    brand = (brand or "").strip()
-    name  = clean_brand_name(brand, name)
-    title = f"{brand} {name}".strip()
-    title = re.sub(r"\s+", " ", title)
-    return shorten(title, maxlen)
-
-def safe_link_label(text):
-    """Slack mrkdwn label에 문제되는 기호 정리"""
+def safe_label(text):
     if not text: return ""
-    t = str(text)
-    return t.replace("|", "¦").replace(">", "›")
+    return str(text).replace("|", "¦").replace(">", "›")
 
 def slack_link(url, label):
-    label = safe_link_label(label)
+    label = safe_label(label)
     if url and isinstance(url, str) and url.startswith("http"):
         return f"<{url}|{label}>"
     return label
 
-# ------------------ 메시지 빌더 ------------------
+# 핵심: 상품명이 브랜드로 시작하면 브랜드를 다시 붙이지 않음(공백/구두점/대소문자 무시)
+def name_starts_with_brand(brand, name):
+    if not brand or not name: return False
+    # 브랜드의 공백을 느슨한 구분자 패턴으로 치환
+    brand_pat = re.escape(brand)
+    brand_pat = re.sub(r"\\\s+", r"[\\s\\-·|/]*", brand_pat)
+    regex = re.compile(r"^\s*" + brand_pat + r"\b", flags=re.I)
+    return bool(regex.search(name))
+
+def tidy_title(brand, name, url=None, maxlen=120):
+    brand = (brand or "").strip()
+    name  = (name or "").strip()
+    # 줄/공백 정리
+    brand = re.sub(r"\s+", " ", brand)
+    name  = re.sub(r"\s+", " ", name)
+    # 브랜드 중복 방지
+    if name_starts_with_brand(brand, name):
+        title = name  # 이미 브랜드로 시작 → 상품명만
+    else:
+        title = f"{brand} {name}".strip() if brand else name
+    title = shorten(title, maxlen)
+    return slack_link(url, title)
+
+# ---------------- sections ----------------
 def build_top10(df):
-    lines = []
+    out = []
     for _, r in df.sort_values("rank").head(10).iterrows():
-        title = tidy_title(r.get("brand"), r.get("product_name"))
-        title = slack_link(r.get("product_url"), title)
+        title = tidy_title(r.get("brand"), r.get("product_name"), r.get("product_url"))
         price = fmt_money(r.get("price_current_usd"))
         ori   = fmt_money(r.get("price_original_usd"))
         disc  = r.get("discount_rate_pct")
         disc_txt = f"(↓{float(disc):.2f}%)" if pd.notna(disc) else ""
-        lines.append(f"{int(r['rank'])}. {title} – {price} (정가 {ori}) {disc_txt}".strip())
-    return "\n".join(lines)
+        out.append(f"{int(r['rank'])}. {title} – {price} (정가 {ori}) {disc_txt}".strip())
+    return "\n".join(out)
 
 def analyze(df_today, df_prev):
     cols = ["product_url", "rank", "brand", "product_name"]
-    t = df_today[cols].rename(columns={"rank": "rank_today", "brand": "brand_t", "product_name": "name_t"})
-    p = df_prev[cols].rename(columns={"rank": "rank_prev",  "brand": "brand_p", "product_name": "name_p"})
+    t = df_today[cols].rename(columns={"rank":"rank_today","brand":"brand_t","product_name":"name_t"})
+    p = df_prev[cols].rename(columns={"rank":"rank_prev", "brand":"brand_p","product_name":"name_p"})
     m = pd.merge(t, p, on="product_url", how="outer")
 
     new_mask  = m["rank_prev"].isna() & m["rank_today"].notna()
@@ -103,8 +103,8 @@ def analyze(df_today, df_prev):
     stay = m[stay_mask].copy()
     stay["delta"] = stay["rank_prev"] - stay["rank_today"]  # +: 상승, -: 하락
 
-    up        = stay[stay["delta"] >= RISE_TH].sort_values(["delta", "rank_today"], ascending=[False, True])
-    down_in   = stay[stay["delta"] <= DROP_TH].sort_values(["delta", "rank_today"])
+    up        = stay[stay["delta"] >= RISE_TH].sort_values(["delta","rank_today"], ascending=[False,True])
+    down_in   = stay[stay["delta"] <= DROP_TH].sort_values(["delta","rank_today"])
     out_top30 = m[out_mask & (m["rank_prev"] <= 30)].copy().sort_values("rank_prev")
     newcomers = m[new_mask].copy().sort_values("rank_today")
 
@@ -113,30 +113,33 @@ def analyze(df_today, df_prev):
     inout_total = ins_cnt + outs_cnt
 
     def row_up(r):
-        title = tidy_title(r.get("brand_t") or r.get("brand_p"), r.get("name_t") or r.get("name_p"))
-        title = slack_link(r.get("product_url"), title)
+        title = tidy_title(r.get("brand_t") or r.get("brand_p"),
+                           r.get("name_t")  or r.get("name_p"),
+                           r.get("product_url"))
         return f"- {title} {int(r['rank_prev'])}위 → {int(r['rank_today'])}위 (↑{int(r['delta'])})"
 
     def row_down(r):
-        title = tidy_title(r.get("brand_t") or r.get("brand_p"), r.get("name_t") or r.get("name_p"))
-        title = slack_link(r.get("product_url"), title)
+        title = tidy_title(r.get("brand_t") or r.get("brand_p"),
+                           r.get("name_t")  or r.get("name_p"),
+                           r.get("product_url"))
         return f"- {title} {int(r['rank_prev'])}위 → {int(r['rank_today'])}위 (↓{abs(int(r['delta']))})"
 
     def row_new(r):
-        title = tidy_title(r.get("brand_t") or r.get("brand_p"), r.get("name_t") or r.get("name_p"))
-        title = slack_link(r.get("product_url"), title)
+        title = tidy_title(r.get("brand_t") or r.get("brand_p"),
+                           r.get("name_t")  or r.get("name_p"),
+                           r.get("product_url"))
         return f"- {title} NEW → {int(r['rank_today'])}위"
 
     def row_out(r):
-        title = tidy_title(r.get("brand_t") or r.get("brand_p"), r.get("name_t") or r.get("name_p"))
-        title = slack_link(r.get("product_url"), title)
+        title = tidy_title(r.get("brand_t") or r.get("brand_p"),
+                           r.get("name_t")  or r.get("name_p"),
+                           r.get("product_url"))
         return f"- {title} {int(r['rank_prev'])}위 → OUT"
 
     lines_up   = [row_up(r)   for _, r in up.head(10).iterrows()]
     lines_new  = [row_new(r)  for _, r in newcomers.head(10).iterrows()]
     lines_down = [row_down(r) for _, r in down_in.head(10).iterrows()]
     lines_out  = [row_out(r)  for _, r in out_top30.head(10).iterrows()]
-
     if lines_out:
         if lines_down:
             lines_down.append("— 어제 TOP30 → OUT —")
@@ -156,7 +159,7 @@ def post_slack(text):
     resp = requests.post(SLACK_WEBHOOK_URL, json={"text": text}, timeout=15)
     resp.raise_for_status()
 
-# ------------------ 메인 ------------------
+# ---------------- main ----------------
 def main():
     latest, prev = find_latest_prev()
     if not latest:
@@ -172,7 +175,7 @@ def main():
 
         parts = [header, top10]
         if res["up"]:
-            parts.append("\n🥇 *금상승* (↑30 이상)")
+            parts.append("\n🥇 *급상승* (↑30 이상)")
             parts.extend(res["up"])
         if res["new"]:
             parts.append("\n🆕 *뉴랭커*")
