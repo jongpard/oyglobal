@@ -2,7 +2,6 @@
 import re
 from typing import Dict, Optional, List
 
-# HTML 태그 제거 (innerHTML 섞일 수 있음)
 TAG_RE = re.compile(r"<[^>]+>")
 
 def _strip_tags(s: str) -> str:
@@ -15,27 +14,26 @@ def _norm(s: str) -> str:
     s = s.replace("\n", " ")
     return s
 
-# 금액 후보: 통화기호 유무 허용 + 천단위 콤마 허용
-# 퍼센트 뒤/앞 숫자는 제외 (37% 같은 것 배제)
-AMOUNT_RE = re.compile(
-    r"(?<![#0-9])"                # 해시태그/연속숫자 앞 배제
-    r"(?:US?\$)?\s*"              # 통화기호 선택
-    r"("                          # 캡처 시작
-    r"(?:\d{1,3}(?:,\d{3})*|\d+)" # 정수부(천단위 콤마 허용)
-    r"(?:\.\d{1,2})?"             # 소수부 선택
-    r")"
-    r"(?!\s*%)",                  # 퍼센트 금지
-    re.I
+# 통화기호가 있는 금액 (두 자리 소수 허용)
+CURR_RE = re.compile(
+    r"US?\$\s*(" r"(?:\d{1,3}(?:,\d{3})*|\d+)" r"(?:\.\d{2})" r")",
+    re.I,
 )
 
-# Value: US$86.00 패턴 (콜론/공백 변형 허용)
-VALUE_RE = re.compile(
-    r"value\s*[:：]?\s*(?:US?\$)?\s*("
-    r"(?:\d{1,3}(?:,\d{3})*|\d+)"
-    r"(?:\.\d{1,2})?"
-    r")",
-    re.I
+# 통화기호 없는 금액은 반드시 두 자리 소수만 허용(평점 4.8 등 제거)
+PLAIN2_RE = re.compile(
+    r"\b(" r"(?:\d{1,3}(?:,\d{3})*|\d+)" r"(?:\.\d{2})" r")\b",
+    re.I,
 )
+
+# Value: US$86.00 (두 자리 소수)
+VALUE_RE = re.compile(
+    r"value\s*[:：]?\s*(?:US?\$)?\s*(" r"(?:\d{1,3}(?:,\d{3})*|\d+)" r"(?:\.\d{2})" r")",
+    re.I,
+)
+
+URL_RE = re.compile(r"https?://\S+")
+PRDTNO_RE = re.compile(r"prdtNo=\w+", re.I)
 
 def _to_float(x: str) -> Optional[float]:
     try:
@@ -45,14 +43,22 @@ def _to_float(x: str) -> Optional[float]:
 
 def _find_amounts(text: str) -> List[float]:
     vals: List[float] = []
-    for m in AMOUNT_RE.finditer(text):
+
+    # 1) 통화 기호가 붙은 금액 우선
+    for m in CURR_RE.finditer(text):
+        v = _to_float(m.group(1))
+        if v is not None:
+            vals.append(v)
+
+    # 2) 통화 기호 없는 금액(반드시 소수점 둘째자리)
+    for m in PLAIN2_RE.finditer(text):
         v = _to_float(m.group(1))
         if v is None:
             continue
-        # 합리적 범위 필터: 0.5 ~ 1000 USD
-        # (0, 추적코드, 비정상 큰 수 제거)
-        if 0.5 <= v <= 1000:
-            vals.append(v)
+        vals.append(v)
+
+    # 합리적 범위만 남김 (0.5 ~ 1000 USD)
+    vals = [v for v in vals if 0.5 <= v <= 1000]
     return vals
 
 def parse_prices_and_discount(price_block_text: str) -> Dict:
@@ -63,7 +69,10 @@ def parse_prices_and_discount(price_block_text: str) -> Dict:
       - 금액이 1개면 할인 없음(정가=현재가)
     """
     raw = _norm(price_block_text)
-    # 텍스트 먼저 → 필요시 태그 제거본도 사용
+    # URL/상품번호 등 숫자 제거
+    raw = URL_RE.sub(" ", raw)
+    raw = PRDTNO_RE.sub(" ", raw)
+    # 텍스트 먼저 → 실패 시 태그 제거본
     value_match = VALUE_RE.search(raw)
     value_price = _to_float(value_match.group(1)) if value_match else None
     amounts = _find_amounts(raw)
