@@ -1,266 +1,215 @@
+# -*- coding: utf-8 -*-
+from __future__ import annotations
+
 import asyncio
 import re
-from typing import List, Dict, Optional, Tuple
+from datetime import datetime, timedelta, timezone
+from typing import Dict, List
 
-from playwright.async_api import async_playwright
+from playwright.async_api import async_playwright, Page, Locator
 
-BASE_URL = "https://global.oliveyoung.com"
-BEST_URL = f"{BASE_URL}/category/best-seller"
 
-PRICE_RE = re.compile(r"US?\$[\s]*([0-9]+(?:\.[0-9]+)?)")
-NUM_RE = re.compile(r"([0-9]+(?:\.[0-9]+)?)")
+BASE_URL = "https://global.oliveyoung.com/"
+# 배너(히어로 드로우) 때문에 첫 anchor 대기가 꼬이지 않도록, 배너를 셀렉터에서 제외
+SEL_PRODUCT_ANCHOR = "a[href*='product/detail']:not([data-banneridx])"
 
-CATEGORY_NOISE = {
-    "all","skincare","makeup","bath & body","hair","face masks","suncare",
-    "k-pop","makeup brush & tools","wellness","supplements","food & drink",
-}
-BADGE_NOISE = {"hot deal","best"}
 
-def _to_float(text: Optional[str]) -> Optional[float]:
-    if not text:
-        return None
-    m = NUM_RE.search(text.replace(",", ""))
-    return float(m.group(1)) if m else None
+# ---------- utilities ----------
 
-def _parse_price(text: str) -> Optional[float]:
-    if not text:
-        return None
-    m = PRICE_RE.search(text.replace(",", ""))
-    if m:
-        return float(m.group(1))
-    return _to_float(text)
+KST = timezone(timedelta(hours=9))
 
-async def _txt(loc) -> str:
-    try:
-        t = (await loc.inner_text()).strip()
-        return re.sub(r"\s+", " ", t)
-    except:
-        return ""
 
-async def _first_text(scope, sels: List[str]) -> str:
-    for s in sels:
-        loc = scope.locator(s).first
-        try:
-            if await loc.count() > 0:
-                t = await _txt(loc)
-                if t:
-                    return t
-        except:
-            pass
-    return ""
+def _today_kst() -> str:
+    return datetime.now(KST).strftime("%Y-%m-%d")
 
-def _normalize_slack_line(brand: str, product: str) -> str:
-    b = (brand or "").strip()
-    p = (product or "").strip()
-    if b and p.lower().startswith(b.lower()):
-        return p
-    if b and p:
-        return f"{b} {p}"
-    return p or b
 
-def _is_noise_name(text: str) -> bool:
-    t = (text or "").strip().lower()
-    if not t:
-        return True
-    if t in BADGE_NOISE:
-        return True
-    # 너무 짧은(라벨) 텍스트 제거
-    if len(t) <= 2:
-        return True
-    return False
+async def _sleep(ms: int) -> None:
+    await asyncio.sleep(ms / 1000)
 
-def _is_noise_brand(brand: str) -> bool:
-    b = (brand or "").strip().lower()
-    if not b:
-        return False
-    return b in CATEGORY_NOISE or b in BADGE_NOISE
 
-async def _scroll_until(page, locator, need=100, max_loops=80):
-    for _ in range(max_loops):
-        cnt = await locator.count()
-        if cnt >= need:
+async def _scroll_until(page: Page, locator: Locator, need: int, max_loops: int = 80) -> None:
+    """
+    lazy-load 리스트가 충분히 붙을 때까지 아래로 스크롤
+    """
+    last_count = -1
+    for i in range(max_loops):
+        count = await locator.count()
+        if count >= need:
             return
-        await page.evaluate("window.scrollBy(0, document.body.scrollHeight)")
-        await page.wait_for_timeout(900)
+        # 더 이상 늘지 않으면 그래도 2~3번 더 스크롤
+        if count == last_count and i > 5:
+            await page.evaluate("window.scrollBy(0, window.innerHeight * 0.9)")
+        else:
+            await page.evaluate("window.scrollBy(0, window.innerHeight * 1.5)")
+        last_count = count
+        await _sleep(250)
+    # need 미만이어도 여기서 종료 → 이후 필터링으로 실제 개수 확정
+
+
+# ---------- core scraping ----------
+
+async def _get_trending_header_top(page: Page) -> float:
+    """
+    'What's trending in Korea' 헤더의 y좌표. 없으면 매우 큰 값 반환(즉, 필터링 무시).
+    """
+    try:
+        trend = page.locator(r"text=/what'?s\s+trending\s+in\s+korea/i").first
+        await trend.wait_for(state="attached", timeout=1000)
+        box = await trend.bounding_box()
+        if box and "y" in box:
+            return float(box["y"])
+    except Exception:
+        pass
+    return 10 ** 9  # 존재하지 않으면 사실상 무한대로
+
+
+async def _collect_cards(page: Page) -> List[Dict]:
+    """
+    Top Orders(베스트) 영역의 카드만 수집.
+    - 배너(anchor data-banneridx)는 처음부터 셀렉터에서 제외
+    - 트렌딩 섹션(What's trending in Korea) 아래의 카드는 버림
+    """
+    all_links = page.locator(SEL_PRODUCT_ANCHOR)
+
+    # 첫 anchor가 붙기만 하면 진행 (visible 대기 아님)
+    await all_links.first.wait_for(state="attached", timeout=30000)
+
+    # 레이지로드 한 번 깨우기
+    await page.evaluate("window.scrollBy(0, 300)")
+    await _sleep(400)
+
+    # 충분히 붙을 때까지 스크롤
+    await _scroll_until(page, all_links, need=140, max_loops=80)
+
+    trending_top = await _get_trending_header_top(page)
+
+    # 각 anchor에서 카드 정보를 뽑는다 (브라우저 컨텍스트에서)
+    js = r"""
+    (e) => {
+      const card = e.closest('li, .prd_item, .product-item, .prod-item, .product, .item, .goods_item') || e.parentElement;
+      const pick = (sel) => card && card.querySelector(sel);
+      const text = (sel) => {
+        const el = pick(sel);
+        return el ? el.textContent.trim() : '';
+      };
+
+      // 브랜드/상품명 후보
+      const brand = text('[class*=brand], .brand, .prd_brand, .product-brand');
+      let name = text('[class*=name], .name, .tit, .title, .product-name, .prd_name');
+      if (!name) {
+        name = e.getAttribute('title') || e.textContent.trim();
+      }
+
+      // 가격 추출
+      const wholeText = (card ? card.textContent : e.textContent) || '';
+      const money = [...wholeText.matchAll(/US\$([\d,.]+)/g)].map(m => m[1].replace(/,/g,''));
+      let priceCur = null, priceOrig = null;
+      if (money.length >= 1) {
+        priceCur = parseFloat(money[0]);
+      }
+      // 정가 또는 Value 가격
+      const mOrig = wholeText.match(/(?:정가|Value)\s*US\$([\d,.]+)/i);
+      if (mOrig) {
+        priceOrig = parseFloat(mOrig[1].replace(/,/g,''));
+      } else if (money.length >= 2) {
+        priceOrig = parseFloat(money[1]);
+      }
+      const mDisc = wholeText.match(/↓\s*([\d.,]+)%/);
+      const discountPct = mDisc ? parseFloat(mDisc[1].replace(/,/g,'')) : null;
+
+      const imgEl = (card && card.querySelector('img')) || null;
+      const img = imgEl ? (imgEl.currentSrc || imgEl.src) : null;
+
+      const rect = e.getBoundingClientRect();
+      const y = rect.top + (window.scrollY || document.documentElement.scrollTop || 0);
+
+      const hasValue = /Value\s*US\$/i.test(wholeText);
+
+      return {
+        brand: (brand || '').trim(),
+        product_name: (name || '').trim(),
+        price_current_usd: priceCur,
+        price_original_usd: priceOrig,
+        discount_rate_pct: discountPct,
+        has_value_price: hasValue,
+        product_url: e.href,
+        image_url: img,
+        y
+      };
+    }
+    """
+
+    handles = await all_links.element_handles()
+    rows: List[Dict] = []
+    for h in handles:
+        data = await h.evaluate(js)
+        # 트렌딩 섹션 아래면 버림
+        if data.get("y", 0) >= trending_top:
+            continue
+        # 배너/광고/잘못된 카드(가격/상품명 누락) 제거
+        name_ok = bool(data.get("product_name"))
+        url_ok = bool(data.get("product_url"))
+        # 가격은 0일 수도 있으니 None만 거른다
+        cur_ok = (data.get("price_current_usd") is not None)
+        if not (name_ok and url_ok and cur_ok):
+            continue
+
+        # 브랜드에 상품명이 섞이는 것을 방지: 브랜드가 상품명과 동일하면 비움
+        brand = (data.get("brand") or "").strip()
+        pname = (data.get("product_name") or "").strip()
+        if brand and pname and brand == pname:
+            brand = ""
+        data["brand"] = brand
+
+        rows.append({
+            "brand": brand,
+            "product_name": pname,
+            "price_current_usd": data.get("price_current_usd"),
+            "price_original_usd": data.get("price_original_usd"),
+            "discount_rate_pct": data.get("discount_rate_pct"),
+            "has_value_price": bool(data.get("has_value_price")),
+            "product_url": data.get("product_url"),
+            "image_url": data.get("image_url"),
+        })
+
+    # 순서를 그대로 랭크로 사용
+    date_kst = _today_kst()
+    result: List[Dict] = []
+    for i, r in enumerate(rows[:100], start=1):
+        r2 = {
+            "date_kst": date_kst,
+            "rank": i,
+            **r,
+        }
+        result.append(r2)
+    return result
+
+
+# ---------- public API ----------
 
 async def scrape_oliveyoung_global() -> List[Dict]:
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True, args=["--no-sandbox"])
-        ctx = await browser.new_context(
-            user_agent=("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                        "AppleWebKit/537.36 (KHTML, like Gecko) "
-                        "Chrome/124.0.0.0 Safari/537.36"),
-            viewport={"width": 1366, "height": 900},
+    """
+    올리브영 글로벌 Top Orders 1~100위 수집.
+    배너/트렌딩/라벨 카드(가격 없는 카드)는 제외.
+    """
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(headless=True, args=["--no-sandbox"])
+        context = await browser.new_context(
+            viewport={"width": 1366, "height": 1200},
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0 Safari/537.36"
+            ),
         )
-        page = await ctx.new_page()
-        await page.goto(BEST_URL, wait_until="domcontentloaded")
+        page = await context.new_page()
+        await page.goto(BASE_URL, wait_until="domcontentloaded", timeout=60000)
 
-        # 상품 링크가 하나라도 보일 때까지 대기
-        await page.wait_for_selector("a[href*='product/detail']", timeout=30000)
+        # 메인 진입 후 잠깐 대기 (상단 배너/레이어 로드)
+        await _sleep(600)
 
-        all_links = page.locator("a[href*='product/detail']")
-        await _scroll_until(page, all_links, need=140, max_loops=80)
+        items = await _collect_cards(page)
 
-        # 트렌딩 섹션 헤더의 y 좌표(경계) 구하기 — 없으면 매우 큰 값으로.
-        trending_y = 10**9
-        for patt in [
-            r"What's trending in Korea", r"What’s trending in Korea",
-            r"Trending in Korea", r"트렌딩", r"요즘 한국"
-        ]:
-            tr = page.locator(f"text=/{patt}/i").first
-            if await tr.count() > 0:
-                bb = await tr.bounding_box()
-                if bb and bb.get("y") is not None:
-                    trending_y = float(bb["y"])
-                    break
-
-        handles = await all_links.element_handles()
-
-        # 링크의 위치로 정렬(읽기 순)
-        async def _pos(h) -> Tuple[float, float]:
-            bb = await h.bounding_box()
-            if not bb:
-                return (10**9, 10**9)
-            return (bb.get("y") or 10**9, bb.get("x") or 10**9)
-
-        handles = sorted(
-            [h for h in handles],
-            key=lambda h: asyncio.get_event_loop().run_until_complete(_pos(h))
-        )
-
-        items: List[Dict] = []
-        seen = set()
-        rank = 1
-
-        for a in handles:
-            bb = await a.bounding_box() or {}
-            y = float(bb.get("y") or 10**9)
-
-            # 트렌딩 섹션 아래로 내려가면 중단
-            if y >= trending_y:
-                break
-
-            href = await a.get_attribute("href") or ""
-            if "/product/detail" not in href:
-                continue
-            if href.startswith("http"):
-                product_url = href
-            elif href.startswith("/"):
-                product_url = BASE_URL + href
-            else:
-                product_url = BASE_URL + "/" + href.lstrip("/")
-
-            if product_url in seen:
-                continue
-            seen.add(product_url)
-
-            # 카드 래퍼
-            card = await a.evaluate_handle(
-                "node => node.closest('li, .prd, .product, .card, .product-item, .item') || node"
-            )
-
-            brand = await _first_text(
-                card,
-                [".brand",".prd_brand",".product-brand",".txt_brand","strong.brand","span.brand"]
-            )
-            name = await _first_text(
-                card,
-                [".name",".prd_name",".product-name",".txt_name","a.name","a.product-name"]
-            )
-            if not name:
-                # 링크 텍스트/이미지 대체
-                name = await _txt(a)
-            if not name:
-                name = await _first_text(card, ["img[alt]"])
-
-            # 라벨/카테고리 노이즈 제거
-            if _is_noise_name(name) or _is_noise_brand(brand):
-                continue
-
-            # 가격들
-            cur_txt = await _first_text(
-                card, [".price .sale",".price .current",".price .now",".product-price-now",".product-price"]
-            ) or await _first_text(card, [".price",".prd_price",".txt_price"])
-            org_txt = await _first_text(
-                card, [".price del",".price .original",".product-price-was",".origin","del"]
-            )
-            val_txt = await _first_text(card, [".value",".benefit",".txt_value",".value-price"])
-            pct_txt = await _first_text(card, [".discount",".sale-percent",".percent",".pct"])
-
-            price_current = _parse_price(cur_txt)
-            price_original = _parse_price(org_txt)
-            value_price = _parse_price(val_txt)
-            has_value_price = bool(value_price is not None)
-
-            discount_pct = _to_float(pct_txt)
-            if discount_pct is None and price_current and price_original:
-                try:
-                    discount_pct = round((1 - (price_current / price_original)) * 100, 2)
-                except ZeroDivisionError:
-                    discount_pct = None
-
-            # 이미지
-            img = await _first_text(card, ["img[src]","img[data-src]"])
-            if img and not img.startswith("http"):
-                img = BASE_URL + "/" + img.lstrip("/")
-
-            # 가격이 전혀 없거나 이름이 비정상이면 스킵
-            if not name or (price_current is None and price_original is None):
-                continue
-
-            items.append({
-                "date_kst": None,
-                "rank": rank,
-                "brand": (brand or "").strip(),
-                "product_name": (name or "").strip(),
-                "price_current_usd": price_current,
-                "price_original_usd": price_original,
-                "discount_rate_pct": discount_pct,
-                "value_price_usd": value_price,
-                "has_value_price": "TRUE" if has_value_price else "FALSE",
-                "product_url": product_url,
-                "image_url": img,
-            })
-
-            rank += 1
-            if rank > 100:
-                break
-
-        # 날짜 채우기
-        from datetime import datetime, timezone, timedelta
-        KST = timezone(timedelta(hours=9))
-        today = datetime.now(KST).strftime("%Y-%m-%d")
-        for it in items:
-            it["date_kst"] = today
-
+        await context.close()
+        await browser.close()
         return items
-
-def build_top10_slack_text(df) -> str:
-    lines = []
-    header = f"*올리브영 글로벌 전체 랭킹* ({df.iloc[0]['date_kst']} KST)\n*TOP 10*"
-    lines.append(header)
-
-    for _, row in df.iterrows():
-        rank = int(row["rank"])
-        brand = (row["brand"] or "").strip()
-        name = (row["product_name"] or "").strip()
-        cur_p = row.get("price_current_usd")
-        org_p = row.get("price_original_usd")
-        pct = row.get("discount_rate_pct")
-        url = row.get("product_url")
-
-        title = _normalize_slack_line(brand, name)
-        link = f"<{url}|{title}>"
-
-        tail = []
-        if cur_p is not None:
-            tail.append(f"US${cur_p:.2f}")
-        if org_p is not None:
-            tail.append(f"(정가 US${org_p:.2f})")
-        if pct is not None:
-            tail.append(f"(↓{pct:.2f}%)")
-
-        line = f"{rank}. {link} – " + " ".join(tail) if tail else f"{rank}. {link}"
-        lines.append(line)
-
-    return "\n".join(lines)
