@@ -1,262 +1,242 @@
+import asyncio
 import re
-from typing import Dict, List, Any
-from datetime import datetime, timezone, timedelta
+from typing import List, Dict, Optional
 
-from playwright.async_api import async_playwright, TimeoutError as PwTimeout
+from playwright.async_api import async_playwright
 
+BASE_URL = "https://global.oliveyoung.com"
 
-BASE = "https://global.oliveyoung.com"
+# 랭킹(Top Orders) 페이지 URL — 기존에 쓰던 주소로 그대로 두고 필요하면 여기만 바꿔줘
+BEST_URL = f"{BASE_URL}/category/best-seller"
 
+PRICE_RE = re.compile(r"US?\$[\s]*([0-9]+(?:\.[0-9]+)?)")
+NUM_RE = re.compile(r"([0-9]+(?:\.[0-9]+)?)")
 
-STOPWORDS = {
-    "HOT DEAL",
-    "BEST",
-    "NEW",
-    "1+1",
-    "GIFT",
-    "ONLY",
-    "EXCLUSIVE",
-    "OLIVE YOUNG ONLY",
-    "SLOW AGING",
-}
-
-
-def _parse_usd(text: str) -> str:
-    """
-    'US$25.99' -> '25.99'
-    'Value: US$86.00' -> '86.00'
-    아무것도 못 찾으면 '' 반환
-    """
+def _to_float(text: Optional[str]) -> Optional[float]:
     if not text:
-        return ""
-    m = re.search(r"US?\$\s*([0-9][0-9,]*\.?[0-9]*)", text.replace(",", ""))
-    return m.group(1) if m else ""
+        return None
+    m = NUM_RE.search(text.replace(",", ""))
+    return float(m.group(1)) if m else None
 
-
-def _pct(cur: str, orig: str) -> str:
+async def _get_text(locator):
     try:
-        c = float(cur)
-        o = float(orig)
-        if o <= 0:
-            return ""
-        p = round((1.0 - c / o) * 100.0, 2)
-        # 음수 할인(즉 인상)은 표시 안 함
-        if p < 0:
-            return ""
-        # 소수점 .0 제거
-        return f"{p:.2f}".rstrip("0").rstrip(".")
-    except Exception:
+        t = (await locator.inner_text()).strip()
+        return re.sub(r"\s+", " ", t)
+    except:
         return ""
 
-
-def _abs_url(url: str) -> str:
-    if not url:
-        return ""
-    if url.startswith("http"):
-        return url
-    if url.startswith("/"):
-        return BASE + url
-    # 상대라면 일단 붙이기
-    return BASE + "/" + url
-
-
-def _clean_brand(brand: str) -> str:
-    if not brand:
-        return ""
-    b = brand.strip()
-    if b.upper() in STOPWORDS:
-        return ""
-    # 너무 긴 건 제품명이 섞였을 가능성 -> 브랜드만 남기도록 긴 공백 기준 첫 토큰만
-    if len(b) > 60 and " " in b:
-        b = b.split(" ")[0]
-    return b
-
-
-async def _load_page(page):
-    await page.goto(BASE, wait_until="domcontentloaded", timeout=60000)
-    # Top Orders 구간이 보이는 곳까지 스크롤
-    try:
-        await page.wait_for_selector("text=/Top Orders/i", timeout=5000)
-    except PwTimeout:
-        pass
-
-    # Lazy load를 위해 충분히 아래로 스크롤
-    last = 0
-    for _ in range(20):
-        await page.mouse.wheel(0, 1800)
-        await page.wait_for_timeout(500)
-        y = await page.evaluate("() => window.scrollY")
-        if y == last:
-            break
-        last = y
-
-
-async def _find_trending_cut(page) -> float:
-    """
-    'What's trending in Korea?' 헤더의 문서 Y좌표를 찾는다.
-    못 찾으면 매우 큰 값(무한대 느낌)을 반환하여 필터가 동작하지 않도록 함.
-    """
-    candidates = [
-        r"/What.?s trending in Korea/i",   # what's / what’s 대응
-        r"/Trending in Korea/i",
-    ]
-    for pat in candidates:
+async def _first_text(node, selectors: List[str]) -> str:
+    for sel in selectors:
+        loc = node.locator(sel).first
         try:
-            loc = page.locator(f"text={pat}").first
-            await loc.wait_for(state="visible", timeout=1500)
-            box = await loc.bounding_box()
-            if box:
-                return box["y"]  # 문서 좌표
-        except PwTimeout:
-            continue
-        except Exception:
-            continue
-    return float("inf")
+            if await loc.count() > 0:
+                t = await _get_text(loc)
+                if t:
+                    return t
+        except:
+            pass
+    return ""
 
+def _parse_price(text: str) -> Optional[float]:
+    if not text:
+        return None
+    m = PRICE_RE.search(text.replace(",", ""))
+    if not m:
+        return _to_float(text)
+    return float(m.group(1))
 
-async def _collect_cards(page, trending_cut_y: float) -> List[Dict[str, Any]]:
-    """
-    카드에서 정보 추출.
-    - 트렌딩 섹션 위쪽(y < trending_cut_y)만 수집
-    - 부족하면 DOM 순서대로 100개까지 자르고 반환
-    """
-    # 카드의 핵심 앵커
-    sel = "a[href*='product/detail']"
+def _normalize_slack_line(brand: str, product: str) -> str:
+    # 제품명이 브랜드로 시작하면(중복) 브랜드는 생략
+    if product.lower().startswith((brand or "").lower().strip()):
+        return product.strip()
+    return f"{brand.strip()} {product.strip()}".strip()
 
-    # 브라우저 컨텍스트에서 한 번에 정보 모으기(성능)
-    js = """
-    (nodes, stopY) => {
-      const STOP = new Set([
-        "HOT DEAL","BEST","NEW","1+1","GIFT","ONLY","EXCLUSIVE","OLIVE YOUNG ONLY","SLOW AGING"
-      ]);
+async def _scroll_until(page, target_locator, need_count=100, max_loops=60):
+    """무한 스크롤 지원: target_locator의 개수가 need_count에 도달할 때까지 스크롤."""
+    for _ in range(max_loops):
+        cnt = await target_locator.count()
+        if cnt >= need_count:
+            return
+        await page.evaluate("window.scrollBy(0, document.body.scrollHeight)")
+        await page.wait_for_timeout(900)
 
-      function pickBrand(card) {
-        // 흔한 브랜드 셀렉터들
-        const cand = card.querySelector("span.brand, .brand, .prd_brand, .product-brand, .txt_brand, .info_brand");
-        if (cand) {
-          const t = cand.textContent.trim();
-          if (t && !STOP.has(t.toUpperCase())) return t;
-        }
-        // 여러 span 중 첫 번째 '정상' 텍스트 골라보기
-        const spans = card.querySelectorAll("span, em, strong");
-        for (const s of spans) {
-          const t = (s.textContent || "").trim();
-          if (!t) continue;
-          const upper = t.toUpperCase();
-          if (STOP.has(upper)) continue;
-          // 숫자/가격/퍼센트 느낌 제거
-          if (/[0-9$%]/.test(t)) continue;
-          // 너무 길면 제품명일 가능성
-          if (t.length > 35) continue;
-          // 이 정도면 브랜드로 보자
-          return t;
-        }
-        return "";
-      }
-
-      function text(el) { return (el && el.textContent || "").trim(); }
-
-      return nodes.map(a => {
-        const card = a.closest("li") || a.closest("div");
-        if (!card) return null;
-
-        const rect = card.getBoundingClientRect();
-        const pageY = rect.top + window.scrollY;
-
-        // 제품명
-        let nameEl = card.querySelector("p.name, .name, .product-name, .prd_name, .txt_name");
-        let product = text(nameEl) || text(a);
-
-        // 이미지
-        const imgEl = card.querySelector("img");
-        const img = imgEl ? (imgEl.getAttribute("src") || imgEl.getAttribute("data-src") || "") : "";
-
-        // 가격
-        const curEl = card.querySelector(".price strong, .sale-price, .now, .price .num, .product-price, .txt_price strong, .txt_price .num");
-        const origEl = card.querySelector(".price del, del, .origin, .before, .strike, .txt_price del");
-        const valEl  = card.querySelector(".value, .benefit, .value-price, .txt_benefit");
-
-        // 랭크 뱃지(있으면 참고, 없으면 나중에 파이썬에서 1~100 부여)
-        const numEl = card.querySelector(".rank, .num, .badge, .number");
-        const rank = numEl ? parseInt((numEl.textContent||'').replace(/[^0-9]/g,'')) : null;
-
-        return {
-          y: pageY,
-          rank,
-          brand: pickBrand(card),
-          product,
-          curText: text(curEl),
-          origText: text(origEl),
-          valText: text(valEl),
-          url: a.getAttribute("href") || "",
-          img,
-        };
-      })
-      .filter(x => !!x && x.product && x.url)
-      .filter(x => x.y < stopY)  // 트렌딩 컷
-    }
-    """
-    nodes = await page.eval_on_selector_all(sel, js, trending_cut_y)
-
-    # 트렌딩 컷이 무한대(=못 찾음)인 경우: 페이지 전체 중 앞에서 100개만 사용
-    if trending_cut_y == float("inf"):
-        nodes = nodes[:130]  # 여유로 모아두고 100개만 자르기
-
-    results: List[Dict[str, Any]] = []
-    seen = set()
-    for n in nodes:
-        url = _abs_url(n.get("url", ""))
-        if url in seen:
-            continue
-        seen.add(url)
-
-        brand = _clean_brand(n.get("brand", ""))
-        product = (n.get("product") or "").strip()
-        # 가격 파싱
-        cur = _parse_usd(n.get("curText", ""))
-        orig = _parse_usd(n.get("origText", ""))
-        val = _parse_usd(n.get("valText", ""))
-        has_value = "TRUE" if val else "FALSE"
-        disc = _pct(cur, orig) if cur and orig else ""
-
-        results.append(
-            {
-                "date_kst": "",  # main에서 세팅
-                "rank": n.get("rank") or "",
-                "brand": brand,
-                "product_name": product,
-                "price_current_usd": cur,
-                "price_original_usd": orig,
-                "discount_rate_pct": disc,
-                "value_price_usd": val,
-                "has_value_price": has_value,
-                "product_url": url,
-                "image_url": n.get("img", ""),
-            }
-        )
-
-    # 100개로 한정
-    return results[:100]
-
-
-async def scrape_oliveyoung_global() -> List[Dict[str, Any]]:
+async def scrape_oliveyoung_global() -> List[Dict]:
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        context = await browser.new_context(
-            locale="en-US",
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0.0.0 Safari/537.36"
-            ),
+        browser = await p.chromium.launch(headless=True, args=["--no-sandbox"])
+        ctx = await browser.new_context(
+            user_agent=("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/124.0.0.0 Safari/537.36"),
+            viewport={"width": 1366, "height": 900},
         )
-        page = await context.new_page()
+        page = await ctx.new_page()
+        await page.goto(BEST_URL, wait_until="domcontentloaded")
 
-        await _load_page(page)
-        cut_y = await _find_trending_cut(page)
-        items = await _collect_cards(page, trending_cut_y=cut_y)
+        # 1) 'Top Orders' 섹션 컨테이너만 잡는다 (상단 배너/카테고리/트렌딩 제외)
+        #    다양한 마크업 변화에 대응하기 위해 헤더 텍스트 기준으로 섹션을 추적한다.
+        heading = page.locator("text=/Top Orders/i").first
+        if await heading.count() == 0:
+            # 영어 사이트 변형 대비 ('Best Sellers'로만 노출되는 케이스)
+            heading = page.locator("text=/Best Sellers|Top Orders/i").first
+        await heading.wait_for(state="visible", timeout=30000)
 
-        await context.close()
-        await browser.close()
+        # 헤더의 가장 가까운 섹션/랩퍼를 기준으로 카드만 선택
+        top_section = heading.locator("xpath=ancestor::section[1]")
+        if await top_section.count() == 0:
+            top_section = heading.locator("xpath=ancestor::*[self::section or self::div][1]")
+
+        # 섹션 내부의 '상품 카드'만: a[href*='product/detail'] 를 갖고 있는 카드 래퍼를 기준으로 수집
+        # (상단 배너/카테고리는 이 섹션 외부라 자연스럽게 제외됨)
+        card_link = top_section.locator("a[href*='product/detail']")
+        # 스크롤하며 100개 이상 로드
+        await _scroll_until(page, card_link, need_count=100, max_loops=80)
+
+        # 실제 카드 래퍼(제품 정보가 함께 있는 박스)로 범위를 좁힌다
+        # a 태그에서 상위 카드로 올라가 정보 추출
+        # (li, div 등 마크업이 바뀌어도 'a'를 기준으로 한 단계 위에서 찾는다)
+        anchors = await card_link.element_handles()
+
+        items = []
+        seen = set()
+        rank = 1
+
+        for a in anchors:
+            # 카드 래퍼
+            card = await a.evaluate_handle("node => node.closest('li, .prd, .product, .card, .product-item, .item') || node")
+            # 링크/이미지
+            href = await a.get_attribute("href") or ""
+            if "product/detail" not in href:
+                continue
+            # 절대 URL로
+            if href.startswith("/"):
+                product_url = BASE_URL + href
+            elif href.startswith("http"):
+                product_url = href
+            else:
+                product_url = BASE_URL + "/" + href.lstrip("/")
+
+            if product_url in seen:
+                continue
+            seen.add(product_url)
+
+            # 브랜드/제품명
+            brand = await _first_text(
+                card,
+                [".brand", ".prd_brand", ".product-brand", ".txt_brand", "strong.brand", "span.brand"]
+            )
+            product_name = await _first_text(
+                card,
+                [".name", ".prd_name", ".product-name", ".txt_name", "a.name", "a.product-name"]
+            )
+            # Fallback: 링크 텍스트/이미지 alt
+            if not product_name:
+                product_name = await _first_text(a, [":scope"])
+            if not product_name:
+                img_alt = await _first_text(card, ["img[alt]"])
+                product_name = img_alt or ""
+
+            # 가격
+            # 현재가(세일가)
+            cur_price_text = await _first_text(
+                card,
+                [".price .sale, .price .current, .price .now, .product-price-now, .product-price"]
+            )
+            if not cur_price_text:
+                cur_price_text = await _first_text(card, [".price", ".prd_price", ".txt_price"])
+            price_current = _parse_price(cur_price_text)
+
+            # 정가
+            orig_price_text = await _first_text(
+                card,
+                [".price del", ".price .original", ".product-price-was", ".origin", "del"]
+            )
+            price_original = _parse_price(orig_price_text)
+
+            # 'Value price'(번들/구성의 명시 값) – 있으면 파싱
+            value_price_text = await _first_text(
+                card,
+                [".value, .benefit, .txt_value, .value-price"]
+            )
+            value_price = _parse_price(value_price_text)
+            has_value_price = bool(value_price is not None)
+
+            # 할인율 (카드에 숫자로 있는 경우 우선)
+            pct_text = await _first_text(
+                card,
+                [".discount, .sale-percent, .percent, .pct"]
+            )
+            discount_pct = _to_float(pct_text)
+
+            # 계산 보정
+            if discount_pct is None and price_current and price_original:
+                try:
+                    discount_pct = round((1 - (price_current / price_original)) * 100, 2)
+                except ZeroDivisionError:
+                    discount_pct = None
+
+            # 이미지
+            img_url = await _first_text(card, ["img[src]", "img[data-src]"])
+            if img_url and not img_url.startswith("http"):
+                img_url = BASE_URL + "/" + img_url.lstrip("/")
+
+            # 브랜드-제품 중복 정리 (브랜드만 남기고 제품명은 순수 제품명)
+            brand = brand.strip()
+            product_name = product_name.strip()
+
+            items.append({
+                "date_kst": None,  # 저장 전에 main에서 채움
+                "rank": rank,
+                "brand": brand,
+                "product_name": product_name,
+                "price_current_usd": price_current,
+                "price_original_usd": price_original,
+                "discount_rate_pct": discount_pct,
+                "value_price_usd": value_price,
+                "has_value_price": str(has_value_price).upper(),
+                "product_url": product_url,
+                "image_url": img_url,
+            })
+            rank += 1
+            if rank > 100:
+                break
+
+        # 날짜 채우기
+        from datetime import datetime, timezone, timedelta
+        KST = timezone(timedelta(hours=9))
+        today = datetime.now(KST).strftime("%Y-%m-%d")
+        for it in items:
+            it["date_kst"] = today
 
         return items
+
+def build_top10_slack_text(df) -> str:
+    """Slack 용 TOP 10 메시지 포맷. 제품명 하이퍼링크, 브랜드-제품 중복 자동 제거."""
+    lines = []
+    header = f"*올리브영 글로벌 전체 랭킹* ({df.iloc[0]['date_kst']} KST)\n*TOP 10*"
+    lines.append(header)
+
+    for _, row in df.iterrows():
+        rank = int(row["rank"])
+        brand = (row["brand"] or "").strip()
+        name = (row["product_name"] or "").strip()
+        cur_p = row.get("price_current_usd")
+        org_p = row.get("price_original_usd")
+        pct = row.get("discount_rate_pct")
+        url = row.get("product_url")
+
+        # 브랜드-제품 중복 제거
+        title = _normalize_slack_line(brand, name)
+        link = f"<{url}|{title}>"
+
+        tail = []
+        if cur_p is not None:
+            tail.append(f"US${cur_p:.2f}")
+        if org_p is not None:
+            tail.append(f"(정가 US${org_p:.2f})")
+        if pct is not None:
+            tail.append(f"(↓{pct:.2f}%)")
+
+        line = f"{rank}. {link} – " + " ".join(tail) if tail else f"{rank}. {link}"
+        lines.append(line)
+
+    return "\n".join(lines)
