@@ -5,13 +5,20 @@ on:
   schedule:
     - cron: "0 0 * * *"   # 매일 09:00 KST
 
-# 커밋/푸시 단계가 성공하려면 필요합니다
+# CSV를 레포에 커밋/푸시하려면 필요
 permissions:
   contents: write
 
 jobs:
   run:
     runs-on: ubuntu-latest
+
+    # 🔑 secrets → env 매핑 (여기를 통해 if:에서 env.*로 체크)
+    env:
+      GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
+      GDRIVE_SERVICE_ACCOUNT_JSON: ${{ secrets.GDRIVE_SERVICE_ACCOUNT_JSON }}
+      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -39,19 +46,14 @@ jobs:
           git push
 
       - name: Upload latest CSV to Google Drive
-        if: ${{ secrets.GDRIVE_FOLDER_ID != '' && secrets.GDRIVE_SERVICE_ACCOUNT_JSON != '' }}
-        env:
-          GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
-          GDRIVE_SERVICE_ACCOUNT_JSON: ${{ secrets.GDRIVE_SERVICE_ACCOUNT_JSON }}
+        if: ${{ env.GDRIVE_FOLDER_ID != '' && env.GDRIVE_SERVICE_ACCOUNT_JSON != '' }}
         run: |
           CSV=$(ls -1t data/*.csv | head -n1)
-          echo "Uploading $CSV"
+          echo "Uploading $CSV to Google Drive folder $GDRIVE_FOLDER_ID"
           python gdrive_upload.py "$CSV"
 
       - name: Send Slack Top 10 message
-        if: ${{ secrets.SLACK_WEBHOOK_URL != '' }}
-        env:
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        if: ${{ env.SLACK_WEBHOOK_URL != '' }}
         run: |
           CSV=$(ls -1t data/*.csv | head -n1)
           echo "Notifying Slack with $CSV"
