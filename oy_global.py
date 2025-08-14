@@ -14,7 +14,6 @@ from price_parser import parse_price
 
 BEST_URL = "https://global.oliveyoung.com/display/page/best-seller?target=pillsTab1Nav1"
 
-# 다중 셀렉터 후보 (구조 변경 대응)
 PRODUCT_CARD_SELECTORS = [
     'li[data-product-id]',
     'ul[class*="prd"] li',
@@ -23,10 +22,11 @@ PRODUCT_CARD_SELECTORS = [
     'li[class*="item"]',
 ]
 NAME_SELECTORS = [
-    '.prod-name', '.name', '.tit', 'a[title]', 'img[alt]'
+    '.prod-name', '.name', '.tit', '.title', '.goods-name',
+    'a[title]', 'img[alt]', '[aria-label]'
 ]
 BRAND_SELECTORS = [
-    '.brand', '.prod-brand', '.brand-name'
+    '.brand', '.prod-brand', '.brand-name', '[data-brand-name]'
 ]
 PRICE_WRAP_SELECTORS = [
     '.price', '.prod-price', '.price-area', '.cost', '.amount'
@@ -38,8 +38,7 @@ LINK_SELECTORS = [
 DEBUG_DIR = "data/debug"
 
 def _ensure_debug_dirs():
-    if not os.path.exists(DEBUG_DIR):
-        os.makedirs(DEBUG_DIR, exist_ok=True)
+    os.makedirs(DEBUG_DIR, exist_ok=True)
 
 async def _click_if_exists(page, selectors_or_text: List[str]) -> bool:
     for sel in selectors_or_text:
@@ -47,124 +46,118 @@ async def _click_if_exists(page, selectors_or_text: List[str]) -> bool:
             if sel.startswith("text="):
                 locator = page.get_by_text(sel.replace("text=", ""), exact=False)
                 if await locator.count() > 0:
-                    await locator.first.click()
-                    return True
+                    await locator.first.click(); return True
             else:
                 loc = page.locator(sel)
                 if await loc.count() > 0:
-                    await loc.first.click()
-                    return True
+                    await loc.first.click(); return True
         except Exception:
-            continue
+            pass
     return False
 
-async def _force_region_us(page) -> None:
-    """
-    미국 기준 노출을 위해 가능한 모든 방법을 시도.
-    기본값: 비활성. OY_FORCE_US=1 일 때만 실행.
-    """
-    candidates = [
-        'button[aria-label*="Ship"]',
-        'button:has-text("Ship to")',
-        'a:has-text("Ship to")',
-        'button:has-text("United States")',
-        'a:has-text("United States")',
-        'text=Ship to',
-        'text=United States',
-        'text=미국',
-        'text=배송지',
-        'text=Country',
-    ]
-    await _click_if_exists(page, candidates)
-    await _click_if_exists(page, [
-        'li:has-text("United States")',
-        'button:has-text("United States")',
-        'text=United States'
-    ])
-    await _click_if_exists(page, ['button:has-text("Save")', 'button:has-text("Apply")', 'button:has-text("OK")'])
-
-async def _soft_wait_networkidle(page, timeout_ms=8000):
-    """
-    networkidle 은 SPA 에서 영원히 오지 않는 경우가 많음 → 소프트 대기.
-    시간 초과시 예외를 올리지 않고 그냥 반환.
-    """
+async def _soft_wait_networkidle(page, timeout_ms=6000):
     try:
         await page.wait_for_load_state("networkidle", timeout=timeout_ms)
     except PWTimeout:
         return
 
-async def _wait_for_any_selector(page, selectors: List[str], total_timeout_ms: int = 30000) -> None:
-    """
-    여러 후보 셀렉터 중 하나라도 나타날 때까지 대기.
-    """
+async def _wait_for_any_selector(page, selectors: List[str], total_timeout_ms: int = 20000) -> None:
     deadline = time.time() + (total_timeout_ms / 1000.0)
-    last_errs = []
     while time.time() < deadline:
         for sel in selectors:
             try:
-                await page.wait_for_selector(sel, timeout=1000, state="attached")
+                await page.wait_for_selector(sel, timeout=800, state="attached")
                 return
-            except PWTimeout as e:
-                last_errs.append((sel, str(e)))
-        await asyncio.sleep(0.2)
-    # 전부 실패 시 마지막 에러 일부만 보여줌
-    sample = "; ".join([f"{s}" for s, _ in last_errs[-5:]])
-    raise PWTimeout(f"Timed out waiting for any product selector. Tried: {sample}")
+            except PWTimeout:
+                pass
+        await asyncio.sleep(0.15)
+    raise PWTimeout("Timed out waiting product cards.")
 
-async def _scroll_to_load(page, target_count=100, step_px=2000, max_rounds=30):
-    """
-    무한 스크롤/지연 로딩 대응: 고정 sleep + DOM 변화 체크.
-    """
-    last_height = 0
-    for i in range(max_rounds):
+async def _scroll_to_load(page, target_count=100, step_px=1600, max_rounds=18):
+    last_count = 0
+    for _ in range(max_rounds):
         await page.evaluate(f"window.scrollBy(0, {step_px});")
-        await asyncio.sleep(0.8)
-        await _soft_wait_networkidle(page, 4000)
-        try:
-            height = await page.evaluate("document.body.scrollHeight")
-        except Exception:
-            height = last_height
-        if height == last_height:
-            # 더보기 버튼이 있을 수 있으니 한 번 눌러본다
-            clicked = await _click_if_exists(page, ['button:has-text("More")', 'button:has-text("더보기")'])
-            if not clicked:
-                break
-        last_height = height
-        # 카드 개수 확인
-        cards_count = 0
+        await asyncio.sleep(0.4)
+        await _soft_wait_networkidle(page, 2500)
+        count = 0
         for sel in PRODUCT_CARD_SELECTORS:
             try:
-                cards_count = max(cards_count, await page.locator(sel).count())
+                count = max(count, await page.locator(sel).count())
             except Exception:
                 pass
-        if cards_count >= target_count:
+        if count >= target_count: break
+        if count == last_count:  # 더이상 증가 없으면 종료
             break
+        last_count = count
+
+def _text_from_attrs(tag) -> str:
+    # aria-label, title, data-name 등 속성 기반 대체
+    for attr in ["aria-label", "title", "data-name", "data-goods-nm", "data-product-name"]:
+        if tag and tag.has_attr(attr) and tag[attr].strip():
+            return tag[attr].strip()
+    return ""
 
 def _extract_text(el, selectors: List[str]) -> str:
     for sel in selectors:
         target = el.select_one(sel)
         if target:
             txt = target.get_text(strip=True)
+            if not txt:
+                txt = _text_from_attrs(target)
             if not txt and target.has_attr("alt"):
                 txt = target["alt"].strip()
             if txt:
                 return txt
+    # fallback: 카드 전체 텍스트에서 줄바꿈 기준 가장 긴 라인
+    raw = el.get_text("\n", strip=True)
+    if raw:
+        parts = [p.strip() for p in raw.split("\n") if p.strip()]
+        parts.sort(key=len, reverse=True)
+        return parts[0] if parts else ""
     return ""
 
+_DETAIL_PATHS = [
+    "/product/detail", "/goods/detail", "/product/", "/goods/"
+]
+_DETAIL_RE = re.compile(r"""['"](?P<url>/(?:product|goods)[^'"]+)['"]""")
+
+def _normalize_href(href: str) -> str:
+    if not href:
+        return ""
+    if href.startswith("//"):
+        href = "https:" + href
+    elif href.startswith("/"):
+        href = "https://global.oliveyoung.com" + href
+    return href
+
 def _extract_link(el, selectors: List[str]) -> str:
+    # 1) 일반 href
     for sel in selectors:
-        target = el.select_one(sel)
-        if target and target.has_attr("href"):
-            href = target["href"]
-            if href.startswith("//"):
-                href = "https:" + href
-            elif href.startswith("/"):
-                href = "https://global.oliveyoung.com" + href
-            return href
+        tag = el.select_one(sel)
+        if tag and tag.has_attr("href"):
+            href = tag["href"].strip()
+            if "javascript:void" not in href:
+                return _normalize_href(href)
+            # javascript:void(0) 인 경우 data-url, data-href 확인
+            for a in ["data-url", "data-href", "data-link", "data-detail-url"]:
+                if tag.has_attr(a) and tag[a]:
+                    return _normalize_href(tag[a])
+            # onclick 속성에서 detail 경로 추출
+            if tag.has_attr("onclick"):
+                m = _DETAIL_RE.search(tag["onclick"])
+                if m:
+                    return _normalize_href(m.group("url"))
+    # 2) 카드 루트에서 data-* 속성
+    for a in ["data-url", "data-href", "data-link", "data-detail-url", "data-product-url"]:
+        if el.has_attr(a) and el[a]:
+            return _normalize_href(el[a])
+    # 3) 상품번호로 추정하여 구성
+    for a in ["data-product-id", "data-goods-no", "data-ref-goodsno", "data-prd-no"]:
+        if el.has_attr(a) and el[a]:
+            return _normalize_href(f"/product/detail?prdNo={el[a]}")
     return ""
 
 def _extract_prices(el) -> (Optional[float], Optional[float]):
-    # sale_price, original_price
     text = el.get_text(" ", strip=True)
     sale = parse_price(text)
     strike = el.select_one('del, .origin, .original, .strike, .price-origin')
@@ -175,8 +168,7 @@ def _extract_prices(el) -> (Optional[float], Optional[float]):
 
 def _calc_discount(sale: Optional[float], original: Optional[float]) -> Optional[int]:
     if sale and original and original > 0 and sale <= original:
-        pct = round((original - sale) / original * 100)
-        return int(pct)
+        return int(round((original - sale) / original * 100))
     return None
 
 def _dedupe(df: pd.DataFrame) -> pd.DataFrame:
@@ -189,11 +181,11 @@ async def _harvest_from_dom(html: str) -> pd.DataFrame:
     soup = BeautifulSoup(html, "html.parser")
     rows = []
     rank = 1
+
     cards: List = []
     for sel in PRODUCT_CARD_SELECTORS:
         cards = soup.select(sel)
-        if cards:
-            break
+        if cards: break
 
     for card in cards:
         name = _extract_text(card, NAME_SELECTORS)
@@ -203,8 +195,7 @@ async def _harvest_from_dom(html: str) -> pd.DataFrame:
         price_wrap = None
         for psel in PRICE_WRAP_SELECTORS:
             price_wrap = card.select_one(psel)
-            if price_wrap:
-                break
+            if price_wrap: break
         sale, original = _extract_prices(price_wrap or card)
         discount = _calc_discount(sale, original)
 
@@ -221,12 +212,11 @@ async def _harvest_from_dom(html: str) -> pd.DataFrame:
         rank += 1
 
     df = pd.DataFrame(rows)
-    df["name"] = df["name"].fillna("").astype(str)
-    df["brand"] = df["brand"].fillna("").astype(str)
     if not df.empty:
+        df["name"] = df["name"].fillna("").astype(str)
+        df["brand"] = df["brand"].fillna("").astype(str)
         df = df.iloc[:100].copy()
-    df = _dedupe(df)
-    return df
+    return _dedupe(df)
 
 async def _collect_json(resp, acc: List[Dict[str, Any]], pred) -> None:
     try:
@@ -247,15 +237,14 @@ def _harvest_from_json(payloads: List[Dict[str, Any]]) -> Optional[pd.DataFrame]
         candidates = []
         if isinstance(data, dict):
             for _, v in data.items():
-                if isinstance(v, list) and len(v) > 0 and isinstance(v[0], dict):
+                if isinstance(v, list) and v and isinstance(v[0], dict):
                     candidates.append(v)
                 elif isinstance(v, dict):
                     for __, v2 in v.items():
-                        if isinstance(v2, list) and len(v2) > 0 and isinstance(v2[0], dict):
+                        if isinstance(v2, list) and v2 and isinstance(v2[0], dict):
                             candidates.append(v2)
-        elif isinstance(data, list):
-            if len(data) > 0 and isinstance(data[0], dict):
-                candidates.append(data)
+        elif isinstance(data, list) and data and isinstance(data[0], dict):
+            candidates.append(data)
 
         for cand in candidates:
             rows = []
@@ -265,28 +254,22 @@ def _harvest_from_json(payloads: List[Dict[str, Any]]) -> Optional[pd.DataFrame]
                 url = prod.get("url") or prod.get("linkUrl") or prod.get("detailUrl") or ""
                 if url and url.startswith("/"):
                     url = "https://global.oliveyoung.com" + url
-
+                # 가격
                 sale = None
                 original = None
                 for key in ["salePrice", "price", "saleAmt", "finalPrice", "goodsPrice"]:
                     v = prod.get(key)
-                    if isinstance(v, (int, float)):
-                        sale = float(v); break
+                    if isinstance(v, (int, float)): sale = float(v); break
                     if isinstance(v, str):
                         p = parse_price(v)
                         if p: sale = p; break
                 for key in ["originPrice", "listPrice", "originalPrice", "marketPrice"]:
                     v = prod.get(key)
-                    if isinstance(v, (int, float)):
-                        original = float(v); break
+                    if isinstance(v, (int, float)): original = float(v); break
                     if isinstance(v, str):
                         p = parse_price(v)
                         if p: original = p; break
-
-                discount = None
-                if sale and original and original > 0 and sale <= original:
-                    discount = int(round((original - sale) / original * 100))
-
+                discount = _calc_discount(sale, original)
                 rows.append({
                     "rank": i,
                     "brand": brand,
@@ -301,15 +284,11 @@ def _harvest_from_json(payloads: List[Dict[str, Any]]) -> Optional[pd.DataFrame]
                 return pd.DataFrame(rows)
     return None
 
-@retry(stop=stop_after_attempt(3), wait=wait_fixed(2))
+@retry(stop=stop_after_attempt(2), wait=wait_fixed(1))
 async def _wait_dom_ready(page, url: str):
-    """
-    초기 진입 안정화: domcontentloaded → 제품 카드 후보 셀렉터 등장까지.
-    """
-    # domcontentloaded 까지만 강제. networkidle 은 소프트로만.
     await page.goto(url, wait_until="domcontentloaded", timeout=60000)
-    await _soft_wait_networkidle(page, 6000)
-    await _wait_for_any_selector(page, PRODUCT_CARD_SELECTORS, total_timeout_ms=35000)
+    await _soft_wait_networkidle(page, 3000)
+    await _wait_for_any_selector(page, PRODUCT_CARD_SELECTORS, total_timeout_ms=15000)
 
 async def _scrape_impl(debug=False) -> pd.DataFrame:
     _ensure_debug_dirs()
@@ -321,48 +300,55 @@ async def _scrape_impl(debug=False) -> pd.DataFrame:
         ])
 
         context = await browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                       "(KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36",
-            # locale/timezone 은 기본값으로 두되, 필요시 헤더만 유지
-            timezone_id="Asia/Seoul",
+            user_agent=("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                        "(KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36"),
             extra_http_headers={"Accept-Language": "en-US,en;q=0.9"},
-            viewport={"width": 1380, "height": 900}
+            viewport={"width": 1280, "height": 900},
+            timezone_id="Asia/Seoul",
         )
+
+        # 속도 향상: 이미지/폰트/스타일시트 차단
+        await context.route("**/*", lambda route: asyncio.create_task(_route_block(route)))
+
         page = await context.new_page()
 
-        # JSON 응답 수집 (best/best-seller 관련)
+        # XHR 수집
         json_payloads: List[Dict[str, Any]] = []
         def is_best_url(u: str) -> bool:
             u = u.lower()
-            return ("best" in u and "seller" in u) or ("best" in u and "list" in u)
+            return ("best" in u and ("seller" in u or "list" in u))
 
         page.on("response", lambda resp: asyncio.create_task(_collect_json(resp, json_payloads, is_best_url)))
 
-        # 진입 및 초기 DOM 대기
+        # 진입
         await _wait_dom_ready(page, BEST_URL)
 
-        # 요청 시에만 미국 강제 (기본 비활성)
-        if os.getenv("OY_FORCE_US", "0") == "1":
-            await _force_region_us(page)
-            await _soft_wait_networkidle(page, 6000)
-            # 지역 변경 후에도 다시 카드 등장 확인
-            await _wait_for_any_selector(page, PRODUCT_CARD_SELECTORS, total_timeout_ms=20000)
+        # 빠른 XHR 대기(있으면 바로 사용)
+        try:
+            resp = await page.wait_for_response(
+                lambda r: is_best_url(r.url) and "application/json" in (r.headers.get("content-type") or ""),
+                timeout=6000
+            )
+            try:
+                data = await resp.json()
+                json_payloads.append({"url": resp.url, "data": data})
+            except Exception:
+                pass
+        except PWTimeout:
+            pass
 
-        # 스크롤로 충분히 로드
-        await _scroll_to_load(page, target_count=100)
+        # 스크롤 최소화(필요할 때만)
+        await _scroll_to_load(page, target_count=100, max_rounds=12)
 
-        # DOM 기준 파싱
         html = await page.content()
         df_dom = await _harvest_from_dom(html)
-
-        # JSON이 더 신뢰되면 JSON 우선
         df_json = _harvest_from_json(json_payloads)
 
         await context.close()
         await browser.close()
 
-        # 선택 로직
-        if df_json is not None and len(df_json) >= 50:
+        # 선택: JSON 우선
+        if df_json is not None and len(df_json) >= 30:
             df = df_json
         elif not df_dom.empty:
             df = df_dom
@@ -375,7 +361,6 @@ async def _scrape_impl(debug=False) -> pd.DataFrame:
                 f.write(html)
             df.to_csv(f"{DEBUG_DIR}/parsed_{stamp}.csv", index=False, encoding="utf-8-sig")
 
-        # 최종 정리
         if not df.empty:
             df["price_str"] = df.apply(
                 lambda r: f"${float(r['price']):.2f}" if pd.notnull(r.get("price")) else (r.get("price_str") or ""),
@@ -386,8 +371,22 @@ async def _scrape_impl(debug=False) -> pd.DataFrame:
             for c in ["brand", "name", "url"]:
                 if c in df.columns:
                     df[c] = df[c].fillna("").astype(str)
-
         return df
+
+async def _route_block(route):
+    try:
+        url = route.request.url
+        if any(url.endswith(ext) for ext in (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".woff", ".woff2", ".ttf")):
+            return await route.abort()
+        res_type = route.request.resource_type
+        if res_type in ("image", "font", "media"):
+            return await route.abort()
+        return await route.continue_()
+    except Exception:
+        try:
+            await route.continue_()
+        except Exception:
+            pass
 
 def scrape_oy_global_us(debug=False) -> pd.DataFrame:
     return asyncio.run(_scrape_impl(debug=debug))
