@@ -5,7 +5,6 @@ on:
   schedule:
     - cron: "0 0 * * *"   # 매일 09:00 KST
 
-# 레포에 CSV 커밋/푸시하려면 필요
 permissions:
   contents: write
 
@@ -13,10 +12,14 @@ jobs:
   run:
     runs-on: ubuntu-latest
 
-    # 🔑 GitHub Secrets → env 매핑
     env:
+      # Google Drive
       GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
-      GDRIVE_SERVICE_ACCOUNT_JSON: ${{ secrets.GDRIVE_SERVICE_ACCOUNT_JSON }}
+      GDRIVE_SA_JSON_B64: ${{ secrets.GDRIVE_SA_JSON_B64 }}
+      GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+      GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+      GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+      # Slack
       SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
 
     steps:
@@ -46,14 +49,14 @@ jobs:
           git push
 
       - name: Upload latest CSV to Google Drive
-        if: ${{ env.GDRIVE_FOLDER_ID != '' && env.GDRIVE_SERVICE_ACCOUNT_JSON != '' }}
-        env:
-          GDRIVE_FOLDER_ID: ${{ env.GDRIVE_FOLDER_ID }}
-          GDRIVE_SERVICE_ACCOUNT_JSON: ${{ env.GDRIVE_SERVICE_ACCOUNT_JSON }}
         run: |
           CSV=$(ls -1t data/*.csv 2>/dev/null | head -n1 || true)
           if [ -z "$CSV" ]; then
             echo "No CSV found. Skipping Drive upload."
+            exit 0
+          fi
+          if [ -z "$GDRIVE_FOLDER_ID" ]; then
+            echo "GDRIVE_FOLDER_ID missing. Skipping Drive upload."
             exit 0
           fi
           echo "Uploading $CSV to Google Drive folder $GDRIVE_FOLDER_ID"
