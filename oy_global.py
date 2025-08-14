@@ -1,165 +1,240 @@
-# oy_global.py
-import os
+# -*- coding: utf-8 -*-
+from __future__ import annotations
+
+import re
 import asyncio
+from typing import Dict, List, Tuple
 from datetime import datetime, timezone, timedelta
-from typing import List, Dict, Tuple, Optional
 
-from bs4 import BeautifulSoup
-import pandas as pd
+from playwright.async_api import async_playwright, Page, Locator
 
-from price_parser import parse_price
-from slack_notify import build_slack_text, post_to_slack
+BASE_URL = "https://global.oliveyoung.com"
 
+# 서울(KST) 타임스탬프
 KST = timezone(timedelta(hours=9))
-BASE_URL = "https://global.oliveyoung.com/display/page/best-seller"
 
-def _extract_from_soup(soup: BeautifulSoup) -> List[Dict]:
-    """HTML에서 베스트 상품 리스트 파싱 (정상/세일 모두 대응)."""
-    out: List[Dict] = []
-    items = soup.select("ul#orderBestProduct li.order-best-product.prdt-unit")
-    for li in items:
-        rank_el = li.select_one(".rank-badge span")
-        brand_el = li.select_one("dl.brand-info > dt")
-        name_el  = li.select_one("dl.brand-info > dd")
 
-        # 가격 블록: 정가 span, 할인가 strong.point (없으면 strong)
-        orig_el  = li.select_one("div.price-info span")
-        sale_el  = li.select_one("div.price-info strong.point") or li.select_one("div.price-info strong")
+# -------------------- 공통 유틸 --------------------
+_PRICE_RE = re.compile(r"US\$\s*([\d]+(?:\.\d{1,2})?)")
 
-        url_el = li.select_one("a[href*='/product/detail']")
-        url = None
-        if url_el:
-            href = url_el.get("href", "")
-            url = href if href.startswith("http") else f"https://global.oliveyoung.com{href}"
+def _parse_prices_from_text(text: str) -> Tuple[float, float]:
+    """
+    카드 전체 텍스트에서 US$ 가격들을 찾아
+    (현재가, 정가)를 추정한다.
+    - 보통 현재가가 더 작으므로 min=현재가, max=정가로 처리
+    - 둘 중 하나만 나오면 둘 다 동일한 값으로 세팅
+    """
+    nums = [float(x) for x in _PRICE_RE.findall(text)]
+    if not nums:
+        return 0.0, 0.0
+    if len(nums) == 1:
+        return nums[0], nums[0]
+    cur, orig = min(nums), max(nums)
+    return cur, orig
 
-        name  = (name_el.get_text(strip=True) if name_el else "").strip()
-        brand = (brand_el.get_text(strip=True) if brand_el else "").strip()
 
-        sale_price = parse_price(sale_el.get_text()) if sale_el else None
-        if orig_el:
-            original_price = parse_price(orig_el.get_text())
+def _round_pct(cur: float, orig: float) -> int:
+    if orig <= 0:
+        return 0
+    pct = 100.0 * (1.0 - (cur / orig))
+    # 반올림하여 정수로
+    return int(round(max(0.0, pct)))
+
+
+async def _autoscroll(page: Page, need: int = 100) -> None:
+    """
+    게으른 로딩을 고려해 부드럽게 스크롤 다운.
+    """
+    last = 0
+    same = 0
+    for _ in range(80):  # 충분히 스크롤
+        await page.mouse.wheel(0, 1600)
+        await page.wait_for_timeout(300)
+        # 앵커 수로 로딩 상황 대략 파악
+        count = await page.locator("a[href*='/product/detail']").count()
+        if count >= need:
+            break
+        if count == last:
+            same += 1
         else:
-            # 세일 표시가 없으면 strong 하나만 존재 -> 할인 없음으로 간주
-            original_price = sale_price
+            same = 0
+        last = count
+        if same >= 8:  # 더 이상 늘지 않으면 종료
+            break
 
-        if not (rank_el and name and sale_price and original_price):
+
+async def _find_top_orders_section(page: Page) -> Locator:
+    """
+    'Top Orders' 섹션 래퍼를 찾아 반환.
+    1순위: 'Top Orders|Best Sellers|TOP 100' 헤딩
+    실패 시: 카테고리 칩(Skincare, Makeup, Bath & Body...)이 포함된 섹션 중
+             상품 카드(a[href*='/product/detail'])가 가장 많은 섹션.
+    """
+    # 1) 명시적 헤딩 탐색
+    heading = page.locator("h2, h3").filter(
+        has_text=re.compile(r"(Top\s*Orders|Best'?s?\s*Sellers|TOP\s*100)", re.I)
+    )
+    if await heading.count():
+        return heading.first.locator("xpath=ancestor::*[self::section or self::div][1]")
+
+    # 2) 카테고리 칩이 있는 섹션 후보
+    chips = r"(Skincare|Makeup|Bath\s*&\s*Body|Hair|Face\s*Masks|Suncare|K-?Pop|Wellness|Supplements|Food\s*&\s*Drink)"
+    candidates = page.locator("section, div").filter(has_text=re.compile(chips, re.I))
+
+    best = None
+    best_links = -1
+    n = await candidates.count()
+    for i in range(n):
+        sec = candidates.nth(i)
+        links = await sec.locator("a[href*='/product/detail']").count()
+        # 'What's trending' 제외(해당 문구가 있으면 제외)
+        has_trending = await sec.locator(":text('What\\'s trending in Korea')").count()
+        if not has_trending and links > best_links:
+            best, best_links = sec, links
+
+    if best:
+        return best
+
+    # 3) 마지막 폴백: 전체 중 제품 링크가 가장 많은 섹션
+    all_containers = page.locator("section, div")
+    best = None
+    best_links = -1
+    n = await all_containers.count()
+    for i in range(min(n, 40)):
+        sec = all_containers.nth(i)
+        links = await sec.locator("a[href*='/product/detail']").count()
+        if links > best_links:
+            best, best_links = sec, links
+
+    if not best:
+        # 페이지 전체
+        return page.locator("body")
+    return best
+
+
+async def _extract_cards_in_top_orders(section: Locator) -> List[Locator]:
+    """
+    섹션 내부에서 '상품 카드' 앵커 기준으로 상위 래퍼를 잡아 카드 리스트로 만든다.
+    """
+    # 앵커 → 가장 가까운 카드 래퍼로 승격
+    anchors = section.locator("a[href*='/product/detail']")
+    count = await anchors.count()
+    cards: List[Locator] = []
+    seen = set()
+    for i in range(count):
+        a = anchors.nth(i)
+        # 카드 래퍼 후보
+        card = a.locator(
+            "xpath=ancestor::li[1] | xpath=ancestor::div[contains(@class,'prd')][1] | xpath=ancestor::div[1]"
+        )
+        # 고유키(첫 앵커 href)로 중복 제거
+        href = await a.get_attribute("href")
+        if not href:
             continue
+        if href in seen:
+            continue
+        seen.add(href)
+        cards.append(card)
 
-        rank = int(rank_el.get_text(strip=True))
+    return cards
 
-        # 할인율 계산
-        discount_pct = 0.0
-        if original_price and original_price > 0 and sale_price is not None:
-            discount_pct = round((original_price - sale_price) / original_price * 100, 2)
 
-        out.append({
-            "rank": rank,
-            "brand": brand,
-            "name": name,
-            "original_price": float(original_price),
-            "sale_price": float(sale_price),
-            "discount_pct": float(discount_pct),
-            "url": url,
-            "raw_name": name,  # 유지
-        })
-    # 랭크 기준 정렬 보정
-    out.sort(key=lambda x: x["rank"])
-    return out
-
-def _parse_html_str(html: str) -> List[Dict]:
-    soup = BeautifulSoup(html, "html.parser")
-    return _extract_from_soup(soup)
-
-def _load_local_html() -> Optional[str]:
-    """data 폴더에 저장된 최신 page_*.html 있으면 사용 (디버그/비상용)."""
-    import glob
-    paths = sorted(glob.glob("data/page_*.html"))
-    if not paths:
-        return None
-    with open(paths[-1], "r", encoding="utf-8", errors="ignore") as f:
-        return f.read()
-
-async def _fetch_live_html() -> Optional[str]:
-    """Playwright로 실시간 페이지 HTML 수집. 실패 시 None."""
+async def _read_text(el: Locator) -> str:
     try:
-        from playwright.async_api import async_playwright
-    except Exception as e:
-        print(f"[WARN] Playwright import 실패: {e}")
-        return None
+        txt = (await el.inner_text()).strip()
+        return re.sub(r"\s+", " ", txt)
+    except:
+        return ""
 
-    # 한국 기준 노출을 위해 기본 로케일 ko-KR로 설정
+
+async def _read_src(el: Locator) -> str:
+    for attr in ("src", "data-src", "data-original", "srcset"):
+        try:
+            v = await el.get_attribute(attr)
+            if v:
+                # srcset일 때 첫 항목만
+                return v.split()[0]
+        except:
+            pass
+    return ""
+
+
+async def scrape_oliveyoung_global() -> List[Dict]:
+    """
+    Top Orders 1~100 수집 (중복 제거, 정렬, 가격/할인 계산)
+    반환: List[dict]
+    """
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
-        context = await browser.new_context(locale="ko-KR")
-        page = await context.new_page()
-        await page.goto(BASE_URL, timeout=60_000, wait_until="domcontentloaded")
-        # 주요 리스트 로드 대기
-        await page.wait_for_selector("ul#orderBestProduct li.order-best-product.prdt-unit", timeout=60_000)
-        html = await page.content()
-        await context.close()
+        page = await browser.new_page()
+        await page.goto(BASE_URL, wait_until="domcontentloaded")
+        await page.wait_for_timeout(1000)
+
+        # 충분히 로드
+        await _autoscroll(page, need=100)
+
+        section = await _find_top_orders_section(page)
+        # 섹션이 보이도록 한 번 더 스크롤
+        await section.scroll_into_view_if_needed()
+        await page.wait_for_timeout(400)
+
+        # 섹션 내부만 추가 스크롤
+        await _autoscroll(page, need=100)
+
+        cards = await _extract_cards_in_top_orders(section)
+        items: List[Dict] = []
+        seen_href = set()
+
+        for idx, card in enumerate(cards, start=1):
+            if len(items) >= 100:
+                break
+
+            # 링크 / 이미지
+            link = card.locator("a[href*='/product/detail']").first
+            href = await link.get_attribute("href") or ""
+            if not href or href in seen_href:
+                continue
+            seen_href.add(href)
+
+            img = card.locator("img").first
+            image_url = await _read_src(img)
+
+            # 브랜드 / 제품명(카드 타이틀)
+            # 사이트 구조가 종종 바뀌므로 다중 CSS 시도
+            brand_sel = "[class*='brand'], .brand, .prd_brand, .brand-name"
+            name_sel = "[class*='name'], .prd_name, .product-name, .name, .tit, .txt"
+
+            brand = (await _read_text(card.locator(brand_sel).first)) or ""
+            title = (await _read_text(card.locator(name_sel).first)) or ""
+            if not title:
+                # 앵커 텍스트 폴백
+                title = await _read_text(link)
+
+            # 가격 추정
+            txt_all = await _read_text(card)
+            price_current_usd, price_original_usd = _parse_prices_from_text(txt_all)
+            discount_rate_pct = _round_pct(price_current_usd, price_original_usd)
+            has_value_price = int(price_original_usd > price_current_usd)
+
+            items.append(
+                {
+                    "rank": idx,
+                    "brand": brand,
+                    "product_name": title,
+                    "price_current_usd": price_current_usd,
+                    "price_original_usd": price_original_usd,
+                    "discount_rate_pct": discount_rate_pct,
+                    "has_value_price": bool(has_value_price),
+                    "product_url": href if href.startswith("http") else (BASE_URL + href),
+                    "image_url": image_url,
+                }
+            )
+
         await browser.close()
-        return html
 
-def _to_dataframe(rows: List[Dict]) -> pd.DataFrame:
-    cols = ["rank", "brand", "name", "original_price", "sale_price", "discount_pct", "url", "raw_name"]
-    df = pd.DataFrame(rows, columns=cols)
-    return df
+    # 랭크 재정렬 & 100개 제한
+    items = items[:100]
+    for i, row in enumerate(items, 1):
+        row["rank"] = i
 
-def _save_csv_and_json(df: pd.DataFrame) -> Tuple[str, str]:
-    today = datetime.now(KST).strftime("%Y-%m-%d")
-    csv_path  = f"data/{today}_global.csv"
-    json_path = f"data/{today}_global.json"
-    df.to_csv(csv_path, index=False, encoding="utf-8")
-    df.to_json(json_path, orient="records", force_ascii=False)
-    return csv_path, json_path
-
-async def _scrape_impl(debug: bool = False) -> pd.DataFrame:
-    html = None
-
-    # 1) 라이브 시도
-    if not debug:
-        html = await _fetch_live_html()
-
-    # 2) 실패/디버그면 로컬 덤프 사용
-    if not html:
-        html = _load_local_html()
-
-    if not html:
-        raise RuntimeError("페이지 HTML을 가져오지 못했습니다. (라이브/로컬 모두 실패)")
-
-    rows = _parse_html_str(html)
-    if not rows:
-        raise RuntimeError("제품 리스트 파싱 실패 (rows=0)")
-
-    df = _to_dataframe(rows)
-    _save_csv_and_json(df)
-    return df
-
-def scrape_oy_global_us(debug: bool = False) -> pd.DataFrame:
-    """엔트리 포인트. CSV/JSON 저장 + 슬랙 알림."""
-    df_today = asyncio.run(_scrape_impl(debug=debug))
-
-    # 전일 비교 로드 (있으면)
-    prev_csv = None
-    from glob import glob
-    import os as _os
-    files = sorted(glob("data/*_global.csv"))
-    if len(files) >= 2:
-        prev_csv = files[-2]
-
-    df_prev = None
-    if prev_csv and _os.path.exists(prev_csv):
-        try:
-            df_prev = pd.read_csv(prev_csv)
-        except Exception:
-            df_prev = None
-
-    # Slack 전송
-    webhook = os.getenv("SLACK_WEBHOOK_URL")
-    if webhook:
-        text = build_slack_text(datetime.now(KST), df_today.to_dict("records"), None if df_prev is None else df_prev.to_dict("records"))
-        post_to_slack(webhook, text)
-    else:
-        print("[INFO] SLACK_WEBHOOK_URL 미설정으로 슬랙 전송 생략")
-
-    return df_today
+    return items
