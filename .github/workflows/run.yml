@@ -3,7 +3,11 @@ name: oliveyoung-global-scraper
 on:
   workflow_dispatch: {}
   schedule:
-    - cron: "0 0 * * *"   # 09:00 KST
+    - cron: "0 0 * * *"   # 매일 09:00 KST
+
+# 커밋/푸시 단계가 성공하려면 필요합니다
+permissions:
+  contents: write
 
 jobs:
   run:
@@ -35,7 +39,7 @@ jobs:
           git push
 
       - name: Upload latest CSV to Google Drive
-        if: ${{ env.GDRIVE_FOLDER_ID != '' }}
+        if: ${{ secrets.GDRIVE_FOLDER_ID != '' && secrets.GDRIVE_SERVICE_ACCOUNT_JSON != '' }}
         env:
           GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
           GDRIVE_SERVICE_ACCOUNT_JSON: ${{ secrets.GDRIVE_SERVICE_ACCOUNT_JSON }}
@@ -45,7 +49,7 @@ jobs:
           python gdrive_upload.py "$CSV"
 
       - name: Send Slack Top 10 message
-        if: ${{ env.SLACK_WEBHOOK_URL != '' }}
+        if: ${{ secrets.SLACK_WEBHOOK_URL != '' }}
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
         run: |
