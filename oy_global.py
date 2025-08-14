@@ -7,6 +7,7 @@ from utils import kst_today_str
 
 BEST_URL = "https://global.oliveyoung.com/display/page/best-seller?target=pillsTab1Nav1"
 
+# 페이지 안에서 카드들을 "보이는 그대로" 추출
 JS_EXTRACT = r"""
 () => {
   const asNum = (s) => {
@@ -17,26 +18,18 @@ JS_EXTRACT = r"""
   };
   const inRange = (v) => typeof v === "number" && v >= 0.5 && v <= 500;
 
-  // ---------- 트렌딩 섹션 y-range ----------
-  let trendTop = Number.NEGATIVE_INFINITY;
-  let trendBottom = Number.NEGATIVE_INFINITY;
-
+  // ---------- 트렌딩 헤더 Y 찾기 (헤더 '아래'는 전부 제외) ----------
+  let trendingHeaderTop = Infinity;
   const trendHeads = Array.from(document.querySelectorAll("body *"))
     .filter(el => /what.?s trending in korea/i.test(el.textContent || ""));
-
   if (trendHeads.length) {
     trendHeads.sort((a,b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top);
     const head = trendHeads[0];
-    let cont = head.closest("section,div,article") || head;
-    let r = cont.getBoundingClientRect();
-    let top = r.top + window.scrollY;
-    let bottom = r.bottom + window.scrollY;
-    if ((bottom - top) > 1400) bottom = top + 1400; // 과대 범위 캡
-    trendTop = top;
-    trendBottom = bottom;
+    const r = (head.closest("section,div,article") || head).getBoundingClientRect();
+    trendingHeaderTop = r.top + window.scrollY;  // 헤더의 top만 쓰고 아래는 다 컷
   }
 
-  // ---------- 카드 스캔 ----------
+  // ---------- 베스트셀러 카드 스캔 ----------
   const anchors = Array.from(document.querySelectorAll("a[href*='product/detail']"));
   const seen = new Set();
   const rows = [];
@@ -51,17 +44,15 @@ JS_EXTRACT = r"""
     const rect = card.getBoundingClientRect();
     const yAbs = rect.top + window.scrollY;
 
-    // 트렌딩 제외
-    if (Number.isFinite(trendTop) && Number.isFinite(trendBottom)) {
-      if (yAbs >= trendTop && yAbs <= trendBottom) continue;
-    }
+    // 트렌딩 헤더 아래는 전부 제외 (Best Sellers는 페이지 상단에 위치)
+    if (Number.isFinite(trendingHeaderTop) && yAbs >= (trendingHeaderTop - 10)) continue;
 
     // 브랜드
     let brand = "";
     const brandEl = card.querySelector('[class*="brand" i], strong.brand');
     if (brandEl) brand = (brandEl.textContent || "").trim();
 
-    // 상품명
+    // 상품명 (a title/aria → 명칭 셀렉터 → img alt → a 텍스트)
     let name = a.getAttribute("title") || a.getAttribute("aria-label") || "";
     if (!name || name.length < 3) {
       const nameEl = card.querySelector("p.name, .name, .prd_name, .product-name, strong.name");
@@ -83,32 +74,36 @@ JS_EXTRACT = r"""
     if (imgEl) img = imgEl.src || imgEl.getAttribute("src") || "";
 
     // ---------- 가격 ----------
+    // 1) price 관련 요소의 보이는 텍스트 우선
     let priceText = Array.from(card.querySelectorAll(
       '[class*="price" i], [id*="price" i], [aria-label*="$" i], [aria-label*="US$" i]'
     )).map(el => (el.innerText || "").replace(/\s+/g," ")).join(" ").trim();
+    // 2) 없으면 카드 전체 텍스트
     if (!priceText) priceText = (card.innerText || "").replace(/\s+/g," ");
 
     const dollars = [];
+    // (A) US$ 붙은 금액만 우선 채집
     for (const m of priceText.matchAll(/US\$ ?([\d,]+(?:\.\d{2})?)/gi)) {
       const v = asNum(m[0]); if (v != null) dollars.push(v);
     }
-    for (const m of priceText.matchAll(/\b([\d,]+\.\d{2})\b/g)) {
-      const v = asNum(m[0]); if (v != null) dollars.push(v);
+    // (B) A가 비어있을 때만, 소수 둘째자리 금액(31.50 등) 보조 채집
+    if (dollars.length === 0) {
+      for (const m of priceText.matchAll(/\b([\d,]+\.\d{2})\b/g)) {
+        const v = asNum(m[0]); if (v != null) dollars.push(v);
+      }
     }
-    for (const m of priceText.matchAll(/\b(\d{1,3}(?:,\d{3})*)\b/g)) {
-      const v = asNum(m[0]);
-      if (v != null && Number.isInteger(v)) dollars.push(v);
-    }
+    // 정수 금액은 아예 사용하지 않음 (1+1, 97% 등 오인 방지)
 
+    // Value: US$xx.xx → 정가 힌트
     let valuePrice = null;
     const vm = priceText.match(/(?<![A-Za-z0-9_])value(?!\s*=)\s*[:：]?\s*US\$ ?([\d,]+(?:\.\d{2})?)/i);
     if (vm) valuePrice = asNum(vm[0]);
 
-    const clean = dollars.filter(v => typeof v === "number" && v >= 0.5 && v <= 500);
+    const clean = dollars.filter(inRange);
     if (clean.length === 0) continue;
 
     const priceCur = Math.min(...clean);
-    const priceOri = (valuePrice && valuePrice >= 0.5 && valuePrice <= 500)
+    const priceOri = (valuePrice && inRange(valuePrice))
       ? valuePrice
       : (clean.length >= 2 ? Math.max(...clean) : priceCur);
 
@@ -118,13 +113,14 @@ JS_EXTRACT = r"""
       product_name: name || "상품",
       price_current_usd: priceCur,
       price_original_usd: priceOri,
-      value_price_usd: valuePrice || null,   // ⬅️ main.py가 기대하는 컬럼 포함
+      value_price_usd: valuePrice || null,
       product_url: abs,
       image_url: img || null,
     });
     seen.add(abs);
   }
 
+  // 위→아래 정렬, 100개 제한
   rows.sort((a, b) => a.y - b.y);
   const items = rows.slice(0, 100).map((r, i) => ({ rank: i + 1, ...r }));
 
@@ -132,8 +128,7 @@ JS_EXTRACT = r"""
     anchorCount: anchors.length,
     candidateCount: rows.length,
     picked: items.length,
-    trendTop,
-    trendBottom,
+    trendingHeaderTop,
     items,
   };
 }
@@ -152,7 +147,7 @@ async def scrape_oliveyoung_global() -> List[Dict]:
         await page.goto(BEST_URL, wait_until="domcontentloaded", timeout=90000)
         await page.wait_for_load_state("networkidle")
 
-        # 지연 로딩: 끝까지 스크롤
+        # 끝까지 스크롤(지연 로딩 안정화)
         prev = -1
         same = 0
         for i in range(40):
@@ -169,11 +164,12 @@ async def scrape_oliveyoung_global() -> List[Dict]:
         await context.close()
 
     print(f"🔎 앵커 수: {res.get('anchorCount')}, 후보 카드: {res.get('candidateCount')}, 최종 채택: {res.get('picked')}")
-    tt = res.get("trendTop"); tb = res.get("trendBottom")
-    if isinstance(tt, (int, float)) and isinstance(tb, (int, float)) and math.isfinite(tt) and math.isfinite(tb):
-        print(f"🧭 트렌딩 y=({tt:.1f}~{tb:.1f})")
+    th = res.get("trendingHeaderTop")
+    if isinstance(th, (int, float)) and math.isfinite(th):
+        print(f"🧭 트렌딩 헤더 Y(top): {th:.1f}")
 
     items: List[Dict] = res.get("items", [])
+
     # 후처리
     for r in items:
         r["date_kst"] = kst_today_str()
