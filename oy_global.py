@@ -2,11 +2,9 @@
 from __future__ import annotations
 
 import asyncio
-import csv
 import re
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional, Tuple
 
 from playwright.async_api import async_playwright, Page, Locator
 
@@ -16,211 +14,276 @@ SEL_PRODUCT_ANCHOR = "a[href*='product/detail']"
 KST = timezone(timedelta(hours=9))
 
 
-def _now_kst_date() -> str:
-    return datetime.now(KST).strftime("%Y-%m-%d")
+# ---------- helpers ----------
+
+def _clean_text(s: Optional[str]) -> str:
+    if not s:
+        return ""
+    return re.sub(r"\s+", " ", s).strip()
 
 
-def _to_float(s: str) -> float:
-    try:
-        return float(s)
-    except Exception:
+def _parse_usd(s: str) -> float:
+    """
+    US$31.86, US$ 44.00, 31.86 등에서 숫자만 추출
+    """
+    if not s:
         return 0.0
+    m = re.search(r"([\d]{1,3}(?:[,\d]{0,3})*(?:\.\d{1,2})?)", s.replace(",", ""))
+    return float(m.group(1)) if m else 0.0
 
 
-def _split_brand_and_product(anchor_text: str) -> (str, str):
-    lines = [ln.strip() for ln in anchor_text.splitlines() if ln.strip()]
-    if not lines:
-        return "", ""
-
-    brand = lines[0]
-    rest = " ".join(lines[1:]).strip()
-
-    if not rest:
-        txt = " ".join(lines)
-        if txt.lower().startswith((brand + " ").lower()):
-            rest = txt[len(brand):].strip()
-        else:
-            rest = txt
-
-    pattern = re.compile(rf"^{re.escape(brand)}\s+", re.IGNORECASE)
-    product = pattern.sub("", rest).strip()
-    return brand, product
-
-
-_price_cur_re = re.compile(r"US\$\s*([0-9]+(?:\.[0-9]+)?)")
-_price_val_re = re.compile(r"(?:정가|Value)\s*[: ]?\s*US\$\s*([0-9]+(?:\.[0-9]+)?)", re.IGNORECASE)
-
-
-def _parse_prices(text: str) -> Dict[str, float | int]:
-    cur = 0.0
-    val = 0.0
-
-    m_cur = _price_cur_re.search(text)
-    if m_cur:
-        cur = _to_float(m_cur.group(1))
-
-    m_val = _price_val_re.search(text)
-    if m_val:
-        val = _to_float(m_val.group(1))
-
-    disc_int = 0
-    if val > 0 and cur > 0 and val >= cur:
-        disc_int = int(round((val - cur) / val * 100))  # ← 정수 % 로 반올림
-
-    return dict(
-        price_current_usd=cur,
-        price_original_usd=val,
-        discount_rate_pct=disc_int,  # ← 정수
-        value_price_usd=val,
-        has_value_price=1 if val > 0 else 0,
-    )
-
-
-async def _get_section_locator(page: Page, title_regex: re.Pattern) -> Locator:
-    heading = page.locator("h2, h3").filter(has_text=title_regex).first
-    await heading.wait_for(state="visible", timeout=30000)
-    section = heading.locator("xpath=ancestor::*[self::section or self::div][1]")
-    return section
-
-
-async def _autoscroll_collect(section: Locator, need: int = 100) -> List[Locator]:
-    seen = set()
-    anchors: List[Locator] = []
-    await section.scroll_into_view_if_needed()
-
-    idle_rounds = 0
-    while True:
-        await asyncio.sleep(0.3)
-        new_found = 0
-
-        batch = section.locator(SEL_PRODUCT_ANCHOR)
-        count = await batch.count()
-        for i in range(count):
-            a = batch.nth(i)
-            href = await a.get_attribute("href") or ""
-            if not href or href in seen:
-                continue
-
-            card = a.locator("xpath=ancestor::*[self::li or self::div][1]")
-            try:
-                await card.scroll_into_view_if_needed()
-            except Exception:
-                pass
-
-            anchors.append(a)
-            seen.add(href)
-            new_found += 1
-
-        if len(anchors) >= need:
-            break
-
-        if new_found == 0:
-            idle_rounds += 1
-        else:
-            idle_rounds = 0
-
-        if idle_rounds >= 5:
-            break
-
-        try:
-            await section.evaluate("(el) => el.scrollBy(0, el.clientHeight)")
-        except Exception:
-            break
-
-    return anchors[:need]
-
-
-async def _extract_item_from_anchor(a: Locator) -> Dict:
-    href = await a.get_attribute("href") or ""
-    product_url = href if href.startswith("http") else (BASE_URL.rstrip("/") + "/" + href.lstrip("/"))
-
-    card = a.locator("xpath=ancestor::*[self::li or self::div][1]")
-    card_text = await card.inner_text()
-
-    anchor_text = await a.inner_text()
-    brand, product = _split_brand_and_product(anchor_text)
-
-    img = ""
+def _round_pct(current: float, original: float) -> int:
+    if not original or original <= 0:
+        return 0
+    pct = (1.0 - (current / original)) * 100.0
+    # 반올림, 음수 보호
     try:
-        img = await a.locator("img").first.get_attribute("src") or ""
+        return int(round(pct))
+    except Exception:
+        return 0
+
+
+async def _first_text(node: Locator, selectors: List[str]) -> str:
+    for sel in selectors:
+        loc = node.locator(sel).first
+        try:
+            t = _clean_text(await loc.text_content())
+            if t:
+                return t
+        except Exception:
+            pass
+    return ""
+
+
+async def _first_attr(node: Locator, selectors: List[str], attr: str) -> str:
+    for sel in selectors:
+        loc = node.locator(sel).first
+        try:
+            v = await loc.get_attribute(attr)
+            if v:
+                return v
+        except Exception:
+            pass
+    return ""
+
+
+# ---------- robust section locator ----------
+
+async def locate_top_orders_section(page: Page) -> Locator:
+    """
+    1) Top Orders/Best Sellers/TOP.. 헤딩 시도
+    2) 실패 시 '상품 앵커 밀도'가 높은 섹션 자동 선택
+       + “What’s trending in Korea” 이하 섹션은 제외
+    """
+    page.set_default_timeout(45000)
+    await page.wait_for_load_state("domcontentloaded")
+
+    # 탭이 있으면 클릭 시도 (있을 때만)
+    try:
+        await page.get_by_role("tab", name=re.compile(r"(Top\s*Orders|Best\s*Sellers)", re.I)).click(timeout=3000)
     except Exception:
         pass
 
-    prices = _parse_prices(card_text)
+    # 1) 헤딩 기반
+    heading_pats = [
+        re.compile(r"(Top\s*Orders|Best\s*Sellers|TOP\s*100|TOP\s*50|TOP\s*10)", re.I),
+        re.compile(r"(베스트|인기|주문\s*상위)", re.I),
+    ]
+    for pat in heading_pats:
+        cand = page.locator("h1,h2,h3,h4").filter(has_text=pat).first
+        try:
+            await cand.wait_for(state="visible", timeout=5000)
+            return cand.locator("xpath=ancestor::*[self::section or self::div][1]")
+        except Exception:
+            pass
 
-    return dict(
-        brand=brand,
-        product_name=product or brand,
-        price_current_usd=prices["price_current_usd"],
-        price_original_usd=prices["price_original_usd"],
-        discount_rate_pct=prices["discount_rate_pct"],  # 정수
-        value_price_usd=prices["value_price_usd"],
-        has_value_price=prices["has_value_price"],
-        product_url=product_url,
-        image_url=img,
-    )
+    # 2) 폴백: 앵커 밀도 높은 섹션 자동 선택(트렌딩 이하 제외)
+    trending = page.locator(":text(\"What's trending in Korea\")").first
+    trending_y = 10 ** 9
+    try:
+        bb = await trending.bounding_box()
+        if bb:
+            trending_y = bb["y"]
+    except Exception:
+        pass
 
+    candidates = page.locator("section, div")
+    best = None
+    best_count = 0
+    count = await candidates.count()
+    # 너무 많으면 상단부터 250개만 검사
+    for i in range(min(count, 250)):
+        sec = candidates.nth(i)
+        try:
+            bb = await sec.bounding_box()
+            if bb and bb["y"] >= trending_y:
+                continue
+            cnt = await sec.locator(SEL_PRODUCT_ANCHOR).count()
+            if cnt > best_count:
+                best = sec
+                best_count = cnt
+        except Exception:
+            continue
+
+    if best:
+        return best
+    # 최후 폴백
+    return page.locator("body")
+
+
+async def _autoscroll_collect(scope: Locator, need: int = 100) -> List[str]:
+    """
+    scope 내부의 상품 anchor href를 스크롤하면서 최대 need개까지 수집 (중복 제거)
+    """
+    hrefs: List[str] = []
+    seen = set()
+    last_len = -1
+    stall = 0
+
+    for _ in range(60):  # 안전 상한
+        # 새 href 수집
+        try:
+            batch = await scope.eval_on_selector_all(
+                SEL_PRODUCT_ANCHOR, "els => els.map(e => e.href)"
+            )
+        except Exception:
+            batch = []
+
+        for h in batch:
+            if h and h not in seen:
+                seen.add(h)
+                hrefs.append(h)
+                if len(hrefs) >= need:
+                    return hrefs[:need]
+
+        # 더 안 늘어나면 스톨 증가
+        if len(hrefs) == last_len:
+            stall += 1
+        else:
+            stall = 0
+        last_len = len(hrefs)
+
+        # 스크롤
+        try:
+            await scope.evaluate("el => el.scrollBy(0, 1200)")
+        except Exception:
+            try:
+                await scope.evaluate("el => el.scrollIntoView({behavior:'instant'})")
+            except Exception:
+                pass
+        await asyncio.sleep(0.3)
+
+        if stall >= 6:  # 6번 연속 정체면 종료
+            break
+
+    return hrefs[:need]
+
+
+async def _parse_card_from_href(page: Page, scope: Locator, href: str) -> Dict:
+    """
+    href를 기준으로 카드 컨테이너를 찾아 정보 추출
+    """
+    a = scope.locator(f"a[href='{href}']").first
+    # 카드 컨테이너 (li/div)
+    card = a.locator("xpath=ancestor::*[self::li or self::div][1]")
+
+    # 브랜드 & 제품명
+    brand = await _first_text(card, [
+        ".tx_brand", ".brand", ".product-brand", ".prd_brand", "em.tx_brand", "em.brand", "em",
+    ])
+
+    name = await _first_text(card, [
+        ".tx_name", ".name", ".product_name", ".prd_name", "p.name", "p.tx_name", "a[title]"
+    ])
+    if not name:
+        alt = await _first_attr(card, ["img", "img.product", "img.prd_img"], "alt")
+        name = alt or name
+
+    brand = _clean_text(brand)
+    name = _clean_text(name)
+
+    # 가격(현재/정가/밸류)
+    text_all = ""
+    try:
+        text_all = await card.inner_text()
+    except Exception:
+        pass
+
+    # value price
+    value_price_usd = 0.0
+    m_val = re.search(r"\(Value[:\s]*US\$\s*([\d.,]+)\)", text_all, re.I)
+    if m_val:
+        value_price_usd = _parse_usd(m_val.group(1))
+
+    # 모든 'US$xx' 숫자 추출 → 일반적으로 큰 값이 정가, 작은 값이 현재가
+    all_prices = [float(x) for x in re.findall(r"US\$\s*([\d]+(?:\.\d{1,2})?)", text_all)]
+    price_current, price_original = 0.0, 0.0
+    if all_prices:
+        price_current = min(all_prices)
+        price_original = max(all_prices)
+    # 혹시 둘 다 0이면 a 주변 텍스트 추가 시도
+    if price_current == 0 or price_original == 0:
+        around = _clean_text(await a.text_content() or "")
+        extra = [float(x) for x in re.findall(r"US\$\s*([\d]+(?:\.\d{1,2})?)", around)]
+        if extra:
+            price_current = price_current or min(extra)
+            price_original = price_original or max(extra)
+
+    discount_rate_pct = _round_pct(price_current, price_original)
+    has_value_price = bool(value_price_usd and value_price_usd > 0)
+
+    # 이미지
+    image_url = await _first_attr(card, ["img", "img.product", "img.prd_img"], "src")
+    if not image_url:
+        image_url = await _first_attr(card, ["img", "img.product", "img.prd_img"], "data-src")
+
+    return {
+        "brand": brand,
+        "product_name": name,
+        "price_current_usd": price_current,
+        "price_original_usd": price_original,
+        "discount_rate_pct": discount_rate_pct,  # 정수
+        "value_price_usd": value_price_usd,
+        "has_value_price": has_value_price,
+        "product_url": href,
+        "image_url": image_url or "",
+    }
+
+
+# ---------- public: main scraping ----------
 
 async def scrape_oliveyoung_global() -> List[Dict]:
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
-        page = await browser.new_page(viewport={"width": 1366, "height": 900})
+        context = await browser.new_context(locale="en-US")
+        page = await context.new_page()
         await page.goto(BASE_URL, wait_until="domcontentloaded")
 
-        # Top Orders / Best Sellers / TOP10/50/100 등 폭넓게 매칭
-        title_re = re.compile(r"(Top\s*Orders|Best\s*Sellers|TOP\s*100|TOP\s*50|TOP\s*10)", re.I)
-        section = await _get_section_locator(page, title_re)
+        section = await locate_top_orders_section(page)
 
-        await section.locator(SEL_PRODUCT_ANCHOR).first.wait_for(state="visible", timeout=30000)
-        anchors = await _autoscroll_collect(section, need=100)
+        # 섹션이 보이도록 위치 조정
+        try:
+            await section.scroll_into_view_if_needed(timeout=5000)
+        except Exception:
+            pass
+
+        hrefs = await _autoscroll_collect(section, need=100)
+        # 안전장치: 중복 제거
+        hrefs = list(dict.fromkeys(hrefs))[:100]
 
         items: List[Dict] = []
-        for a in anchors:
+        rank = 1
+        for href in hrefs:
             try:
-                items.append(await _extract_item_from_anchor(a))
+                data = await _parse_card_from_href(page, section, href)
+                data["date_kst"] = datetime.now(KST).strftime("%Y-%m-%d")
+                data["rank"] = rank
+                items.append(data)
+                rank += 1
             except Exception:
                 continue
 
+        await context.close()
         await browser.close()
 
-    date_kst = _now_kst_date()
-    for i, it in enumerate(items, start=1):
-        it["date_kst"] = date_kst
-        it["rank"] = i
-
-    return items
-
-
-# ----------------- CSV -----------------
-CSV_HEADER = [
-    "date_kst",
-    "rank",
-    "brand",
-    "product_name",
-    "price_current_usd",
-    "price_original_usd",
-    "discount_rate_pct",
-    "value_price_usd",
-    "has_value_price",
-    "product_url",
-    "image_url",
-]
-
-
-def save_csv(items: List[Dict], path: str) -> None:
-    p = Path(path)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    with p.open("w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=CSV_HEADER)
-        w.writeheader()
-        for it in items:
-            row = {k: it.get(k, "") for k in CSV_HEADER}
-            w.writerow(row)
-
-
-if __name__ == "__main__":
-    print("🔎 올리브영 글로벌몰 베스트 셀러 수집 시작")
-    out = f"data/oliveyoung_global_{_now_kst_date()}.csv"
-    items = asyncio.run(scrape_oliveyoung_global())
-    save_csv(items, out)
-    print(f"📁 저장 완료: {out}")
+        return items
