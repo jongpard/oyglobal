@@ -1,213 +1,155 @@
 # oy_global.py
 import asyncio
-import re
-from typing import List, Dict, Tuple
+from typing import List, Dict
 
-from playwright.async_api import async_playwright, BrowserContext
-from price_parser import parse_prices_and_discount
+from playwright.async_api import async_playwright
 from utils import kst_today_str
 
 BEST_URL = "https://global.oliveyoung.com/display/page/best-seller?target=pillsTab1Nav1"
 
-async def _new_context(pw) -> BrowserContext:
-    browser = await pw.chromium.launch(headless=True)
-    context = await browser.new_context(
-        user_agent=("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/120.0.0.0 Safari/537.36"),
-        locale="en-US",
-    )
-    return context
+JS_EXTRACT = r"""
+() => {
+  // 헬퍼
+  const asNum = (s) => {
+    if (!s) return null;
+    const m = String(s).match(/([\d,]+(?:\.\d{2})?)/);
+    if (!m) return null;
+    return parseFloat(m[1].replace(/,/g, ""));
+  };
 
-async def _try_close_overlays(page):
-    for sel in [
-        "button:has-text('Accept All')",
-        "button:has-text('Accept')",
-        "button:has-text('OK')",
-        "button:has-text('Close')",
-        ".cookie .close", ".popup .close", ".modal .btn-close",
-    ]:
-        try:
-            if await page.is_visible(sel):
-                await page.click(sel, timeout=600)
-                await asyncio.sleep(0.2)
-        except:
-            pass
+  // 트렌딩 섹션 y-range 찾기
+  let trendTop = -Infinity, trendBottom = -Infinity;
+  const all = Array.from(document.querySelectorAll("body *"));
+  const trendNode = all.find(el => /what.?s trending in korea/i.test(el.textContent || ""));
+  if (trendNode) {
+    const box = (trendNode.closest("section,div,article") || trendNode).getBoundingClientRect();
+    trendTop = box.top + window.scrollY;
+    trendBottom = box.bottom + window.scrollY;
+  }
 
-async def _wait_attached(page, selector, timeout=25000) -> bool:
-    try:
-        await page.wait_for_selector(selector, state="attached", timeout=timeout)
-        return True
-    except:
-        return False
+  // 베스트 카드 = 상품 상세로 가는 링크가 있는 가장 가까운 카드
+  const anchors = Array.from(document.querySelectorAll("a[href*='product/detail']"));
+  const seen = new Set();
+  const rows = [];
 
-async def _scroll_until_stable(page, min_iters=12, max_iters=32, step=3200, pause=0.75):
-    prev = -1
-    stable = 0
-    for i in range(max_iters):
-        await page.mouse.wheel(0, step)
-        await asyncio.sleep(pause)
-        cnt = len(await page.query_selector_all("a[href*='product/detail']"))
-        if cnt == prev:
-            stable += 1
-        else:
-            stable = 0
-        prev = cnt
-        if i >= min_iters and stable >= 3:
-            break
+  for (const a of anchors) {
+    const href = a.href || a.getAttribute("href") || "";
+    if (!href) continue;
+    const abs = href.startsWith("http") ? href : (location.origin + href);
+    if (seen.has(abs)) continue;
 
-async def _find_trending_bounds(page) -> Tuple[float, float]:
-    heads = []
-    for txt in ["What's trending in Korea?", "What’s trending in Korea?"]:
-        try:
-            loc = page.get_by_text(txt).first
-            bb = await loc.bounding_box()
-            if bb: heads.append(bb["y"])
-        except:
-            pass
-    if not heads:
-        return float("inf"), float("-inf")
-    top_y = min(heads)
-    bottom_y = top_y + 1800.0
-    return top_y, bottom_y
+    const card = a.closest("li, article, .item, .unit, .prd_info, .product, .prod, .box") || a;
+    const rect = card.getBoundingClientRect();
+    const yAbs = rect.top + window.scrollY;
 
-def _clean(s: str) -> str:
-    return re.sub(r"\s+", " ", (s or "").strip())
+    // 트렌딩 구간 제외
+    if (trendTop > -Infinity && yAbs >= trendTop && yAbs <= trendBottom) continue;
 
-async def _extract_name(a, card) -> str:
-    # 0) a 속성(정확도 높음)
-    for attr in ["aria-label", "title"]:
-        v = await a.get_attribute(attr)
-        if v:
-            v = _clean(v)
-            if len(v) >= 5:
-                return v
-    # 1) 전용 셀렉터
-    for sel in ["p.name", ".name", ".prd_name", ".product-name", "strong.name"]:
-        el = await card.query_selector(sel)
-        if el:
-            t = _clean(await el.inner_text())
-            if len(t) >= 5:
-                return t
-    # 2) 이미지 alt
-    img = await card.query_selector("img[alt]")
-    if img:
-        alt = _clean(await img.get_attribute("alt"))
-        if len(alt) >= 5:
-            return alt
-    # 3) a 텍스트(너무 짧은 숫자 방지)
-    t = _clean(await a.inner_text())
-    if len(t) >= 5:
-        return t
-    # 4) 카드 title/aria-label
-    for attr in ["title", "aria-label"]:
-        val = await card.get_attribute(attr)
-        if val:
-            val = _clean(val)
-            if len(val) >= 5:
-                return val
-    return "상품"
+    // 브랜드
+    let brand = "";
+    const brandEl = card.querySelector('[class*="brand" i], strong.brand');
+    if (brandEl) brand = brandEl.textContent.trim();
 
-async def _price_text(card) -> str:
-    # URL/속성 숫자 오염을 막기 위해 innerText만 사용
-    try:
-        return await card.evaluate("el => (el.innerText || '').replace(/\\n/g, ' ')")
-    except:
-        try:
-            return await card.inner_text()
-        except:
-            return ""
+    // 상품명: a의 title/aria-label/텍스트 순
+    let name = a.getAttribute("title") || a.getAttribute("aria-label") || a.textContent || "";
+    name = name.replace(/\s+/g, " ").trim();
+    if (!name || name.length < 3) {
+      const nameEl = card.querySelector("p.name, .name, .prd_name, .product-name, strong.name");
+      if (nameEl) name = (nameEl.textContent || "").replace(/\s+/g, " ").trim();
+    }
+
+    // 이미지
+    let img = "";
+    const imgEl = card.querySelector("img");
+    if (imgEl) img = imgEl.src || imgEl.getAttribute("src") || "";
+
+    // 가격: 카드의 '보이는 텍스트'만 사용
+    const visible = (card.innerText || "").replace(/\s+/g, " ");
+    const allDollar = Array.from(visible.matchAll(/US\$ ?([\d,]+(?:\.\d{2})?)/g)).map(m => asNum(m[0]));
+    // Value: US$xx.xx → 정가로 취급
+    const vm = visible.match(/value\s*[:：]?\s*US\$ ?([\d,]+(?:\.\d{2})?)/i);
+    const valuePrice = vm ? asNum(vm[0]) : null;
+
+    let priceCur = null, priceOri = null;
+    if (allDollar.length >= 1) {
+      // 일반: 가장 작은 값 = 현재가
+      priceCur = Math.min(...allDollar);
+      if (valuePrice != null) {
+        priceOri = valuePrice;
+      } else if (allDollar.length >= 2) {
+        priceOri = Math.max(...allDollar);
+      } else {
+        priceOri = priceCur;
+      }
+    }
+
+    // 금액 sanity 체크(0.5~500달러만)
+    const ok = (v) => typeof v === "number" && v >= 0.5 && v <= 500;
+    if (!ok(priceCur)) continue;
+    if (!ok(priceOri)) priceOri = priceCur;
+
+    seen.add(abs);
+    rows.push({
+      y: yAbs,
+      brand: brand || null,
+      product_name: name || "상품",
+      price_current_usd: priceCur,
+      price_original_usd: priceOri,
+      product_url: abs,
+      image_url: img || null,
+    });
+  }
+
+  // y(위->아래) 정렬, 100개 제한
+  rows.sort((a, b) => a.y - b.y);
+  const out = rows.slice(0, 100).map((r, idx) => ({
+    rank: idx + 1,
+    ...r
+  }));
+  return out;
+}
+"""
 
 async def scrape_oliveyoung_global() -> List[Dict]:
     async with async_playwright() as pw:
-        context = await _new_context(pw)
+        browser = await pw.chromium.launch(headless=True)
+        context = await browser.new_context(
+            user_agent=("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/120 Safari/537.36"),
+            locale="en-US",
+        )
         page = await context.new_page()
-
         await page.goto(BEST_URL, wait_until="domcontentloaded", timeout=90000)
-        await _try_close_overlays(page)
         await page.wait_for_load_state("networkidle")
 
-        await _wait_attached(page, "a[href*='product/detail']", timeout=25000)
-        await _scroll_until_stable(page)
+        # 끝까지 스크롤(보이는대로 수집)
+        prev = -1
+        same = 0
+        for i in range(35):
+            await page.mouse.wheel(0, 3000)
+            await asyncio.sleep(0.6)
+            cnt = await page.locator("a[href*='product/detail']").count()
+            if cnt == prev:
+                same += 1
+            else:
+                same = 0
+            prev = cnt
+            if i > 12 and same >= 3:
+                break
 
-        # 상세 링크(y좌표 포함)
-        all_links = await page.query_selector_all("a[href*='product/detail']")
-        triples: List[Tuple[float, str, object]] = []
-        for a in all_links:
-            try:
-                bb = await a.bounding_box()
-                if not bb:
-                    continue
-                href = await a.get_attribute("href")
-                if not href:
-                    continue
-                url = href if href.startswith("http") else f"https://global.oliveyoung.com{href}"
-                triples.append((bb["y"], url, a))
-            except:
-                continue
-
-        triples.sort(key=lambda t: t[0])
-        t_top, t_bottom = await _find_trending_bounds(page)
-
-        # 트렌딩 제외(위+아래 포함), URL 중복 제거
-        selected: List[Tuple[str, object]] = []
-        seen = set()
-        for y, url, a in triples:
-            if t_top <= y <= t_bottom:
-                continue
-            if url in seen:
-                continue
-            seen.add(url)
-            selected.append((url, a))
-
-        print(f"🔎 링크 전체: {len(triples)}개, 선택(트렌딩 제외): {len(selected)}개, "
-              f"트렌딩 y=({t_top:.1f}~{t_bottom:.1f})")
-
-        items: List[Dict] = []
-        rank = 0
-        ok = 0
-
-        for url, a in selected:
-            try:
-                card = await a.evaluate_handle("el => el.closest('li,div,article') || el")
-                img_el = await card.query_selector("img")
-                img_url = (await img_el.get_attribute("src")) if img_el else None
-
-                # 브랜드(있으면)
-                brand = None
-                for sel in ["strong.brand", ".brand", ".prd_brand", ".product-brand"]:
-                    el = await card.query_selector(sel)
-                    if el:
-                        t = _clean(await el.inner_text())
-                        if t:
-                            brand = t
-                            break
-
-                name = await _extract_name(a, card)
-                price_blob = await _price_text(card)
-                price_info = parse_prices_and_discount(price_blob)
-                if price_info.get("price_current_usd") is None:
-                    continue
-
-                rank += 1
-                ok += 1
-                items.append({
-                    "date_kst": kst_today_str(),
-                    "rank": rank,
-                    "brand": brand,
-                    "product_name": name,
-                    "price_current_usd": price_info["price_current_usd"],
-                    "price_original_usd": price_info["price_original_usd"],
-                    "discount_rate_pct": price_info["discount_rate_pct"],
-                    "value_price_usd": price_info["value_price_usd"],
-                    "has_value_price": price_info["has_value_price"],
-                    "product_url": url,
-                    "image_url": img_url,
-                })
-            except Exception:
-                continue
+        # 페이지 안에서 한 번에 추출
+        rows = await page.evaluate(JS_EXTRACT)
 
         await context.close()
-        print(f"✅ 가격 파싱 성공: {ok}개")
-        items.sort(key=lambda x: x["rank"])
-        return items
+
+    # 파이썬 측에서 마무리(날짜 붙이고 필드 순서 정리)
+    for r in rows:
+        r["date_kst"] = kst_today_str()
+        # 할인율
+        cur, ori = r["price_current_usd"], r["price_original_usd"]
+        r["discount_rate_pct"] = round((1 - cur / ori) * 100, 2) if ori and ori > 0 else 0.0
+        r["has_value_price"] = False  # (글로벌몰은 Value 문구만 정가 힌트로 쓰고 별도 저장 X)
+
+    # CSV 저장/리턴은 main.py가 처리
+    return rows
