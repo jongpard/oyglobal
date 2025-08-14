@@ -174,3 +174,37 @@ async def scrape_oliveyoung_global() -> List[Dict]:
                     if el:
                         t = (await el.inner_text()).strip()
                         if t:
+                            product_name = re.sub(r"\s+", " ", t)
+                            break
+                if not product_name:
+                    t = (await a.inner_text()).strip()
+                    product_name = re.sub(r"\s+", " ", t)
+
+                price_blob = await _gather_price_blob(card)
+                price_info = parse_prices_and_discount(price_blob)
+                if price_info.get("price_current_usd") is None:
+                    continue
+
+                rank += 1
+                parsed_ok += 1
+                items.append({
+                    "date_kst": kst_today_str(),
+                    "rank": rank,
+                    "brand": brand,
+                    "product_name": product_name,
+                    "price_current_usd": price_info["price_current_usd"],
+                    "price_original_usd": price_info["price_original_usd"],
+                    "discount_rate_pct": price_info["discount_rate_pct"],
+                    "value_price_usd": price_info["value_price_usd"],
+                    "has_value_price": price_info["has_value_price"],
+                    "product_url": url,
+                    "image_url": img_url
+                })
+            except Exception:
+                continue
+
+        await context.close()
+        print(f"✅ 가격 파싱 성공: {parsed_ok}개")
+
+        items.sort(key=lambda x: x["rank"])
+        return items
