@@ -14,7 +14,10 @@ PRODUCT_CARD_SELECTORS = [
     'li[class*="prd"]', 'li[class*="item"]', 'div[class*="prd"] li'
 ]
 NAME_SELECTORS  = ['.prod-name','.name','.tit','.title','.goods-name','a[title]','img[alt]','[aria-label]']
-BRAND_SELECTORS = ['.brand','.prod-brand','.brand-name','[data-brand-name]']
+BRAND_SELECTORS = [
+    '.brand','.prod-brand','.brand-name','[data-brand-name]',
+    '.badge.brand', '.flag-brand', 'em.brand', 'strong.brand', 'span[class*="brand"]'
+]
 PRICE_WRAP_SELECTORS = ['.price','.prod-price','.price-area','.cost','.amount']
 LINK_SELECTORS = ['a[href], a[onclick]']
 
@@ -57,19 +60,22 @@ def _extract_name(card) -> str:
     return ""
 
 def _extract_brand(card, name_after:str) -> str:
-    # 셀렉터에서만 탐색 (fallback 금지: 제품명 오염 방지)
+    # 1) 카드에서 브랜드 라벨을 찾는다 (제품명 오염 방지, 셀렉터만 사용)
     for sel in BRAND_SELECTORS:
         t = card.select_one(sel)
         if t:
             txt = (t.get_text(strip=True) or _text_from_attrs(t)).strip()
             if txt: return txt
-    # [브랜드] 제품명 패턴 분리
+    # 2) [브랜드] 제품명 패턴 분리
     m = re.match(r"^\s*\[(?P<b>[^]]+)\]\s*(?P<n>.+)$", name_after)
     if m: return m.group("b").strip()
+    # 3) 이름이 'VT PDRN ...' 처럼 첫 토큰이 짧고 대문자 위주면 브랜드로 추정
+    tok = name_after.split()[0] if name_after else ""
+    if 1 <= len(tok) <= 12 and re.fullmatch(r"[A-Z0-9&\-\+\.]+", tok):
+        return tok
     return ""
 
 def _extract_prices(card) -> (Optional[float], Optional[float]):
-    # sale, original
     pw = None
     for s in PRICE_WRAP_SELECTORS:
         pw = card.select_one(s)
@@ -173,7 +179,6 @@ async def _harvest_from_dom(html: str) -> pd.DataFrame:
         df["rank"] = range(1, len(df)+1)
         for c in ["brand","name","url"]:
             df[c] = df[c].fillna("").astype(str)
-        # 호환 컬럼
         df["price"] = df["sale_price"]
     return df
 
@@ -209,12 +214,21 @@ def _harvest_from_json_payloads(payloads: List[Dict[str, Any]]) -> Optional[pd.D
                 name  = prod.get("name") or prod.get("productName") or prod.get("goodsNm") or ""
                 brand = prod.get("brand") or prod.get("brandName") or ""
                 url   = _url_from_item(prod)
+
                 sale = None
                 for k in ["salePrice","price","saleAmt","finalPrice","goodsPrice","sale_price"]:
-                    n = _num(prod.get(k));  if n is not None: sale = n; break
+                    n = _num(prod.get(k))
+                    if n is not None:
+                        sale = n
+                        break
+
                 ori = None
                 for k in ["originPrice","listPrice","originalPrice","marketPrice","ori_price"]:
-                    n = _num(prod.get(k));  if n is not None: ori = n; break
+                    n = _num(prod.get(k))
+                    if n is not None:
+                        ori = n
+                        break
+
                 disc = round((ori-sale)/ori*100, 2) if sale and ori and ori>0 and sale<=ori else None
                 rows.append({
                     "rank": i, "brand": brand, "name": name,
@@ -259,7 +273,6 @@ async def _click_if_exists(page, texts_or_sel: List[str]) -> bool:
     return False
 
 async def _force_region_kr(page):
-    # Ship to / 배송지 모달에서 대한민국 선택 시도
     await _click_if_exists(page, ['button:has-text("배송지")','a:has-text("배송지")','button:has-text("Ship to")','a:has-text("Ship to")','text=배송지','text=Ship to'])
     await _click_if_exists(page, ['li:has-text("대한민국")','button:has-text("대한민국")','text=대한민국','li:has-text("Korea")','button:has-text("Korea")','text=Korea'])
     await _click_if_exists(page, ['button:has-text("저장")','button:has-text("확인")','button:has-text("Save")','button:has-text("Apply")'])
@@ -279,7 +292,6 @@ async def _scrape_impl(debug=False) -> pd.DataFrame:
         context = await browser.new_context(
             user_agent=("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                         "(KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36"),
-            # 한국 기준: 언어/타임존
             locale="ko-KR",
             timezone_id="Asia/Seoul",
             extra_http_headers={"Accept-Language":"ko-KR,ko;q=0.9,en-US;q=0.8"},
@@ -293,8 +305,6 @@ async def _scrape_impl(debug=False) -> pd.DataFrame:
         page.on("response", lambda resp: asyncio.create_task(_collect_any_json(resp, payloads)))
 
         await _wait_dom_ready(page, BEST_URL)
-
-        # 한국 기준 강제 (필요시)
         if os.getenv("OY_FORCE_KR","1") == "1":
             await _force_region_kr(page)
             await asyncio.sleep(1.0)
@@ -319,17 +329,15 @@ async def _scrape_impl(debug=False) -> pd.DataFrame:
         await context.close(); await browser.close()
 
         df = df_json if (df_json is not None and not df_json.empty) else (df_dom if df_dom is not None else pd.DataFrame([]))
-
         if not df.empty:
             df = df.head(100).copy()
             df["rank"] = range(1, len(df)+1)
             for c in ["brand","name","url"]:
                 df[c] = df[c].fillna("").astype(str)
-            # 호환
             df["price"] = df["sale_price"]
             df["price_str"] = df.apply(
                 lambda r: f"US${float(r['sale_price']):.2f}" if pd.notnull(r.get("sale_price"))
-                          else (f"US${float(r['original)price']):.2f}" if pd.notnull(r.get('original_price')) else ""),
+                else (f"US${float(r['original_price']):.2f}" if pd.notnull(r.get('original_price')) else ""),
                 axis=1
             )
         return df
