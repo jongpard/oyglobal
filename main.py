@@ -20,16 +20,15 @@ async def run():
         return
 
     df = pd.DataFrame(items)
-    # 저장 경로
+
     os.makedirs(DATA_DIR, exist_ok=True)
     out_path = os.path.join(DATA_DIR, f"oliveyoung_global_{_today_kst_date_str()}.csv")
 
-    # 컬럼 순서 고정
     cols = [
-        "date_kst", "rank", "brand", "product_name",
-        "price_current_usd", "price_original_usd",
-        "discount_rate_pct", "value_price_usd", "has_value_price",
-        "product_url", "image_url"
+        "date_kst","rank","brand","product_name",
+        "price_current_usd","price_original_usd",
+        "discount_rate_pct","value_price_usd","has_value_price",
+        "product_url","image_url",
     ]
     for c in cols:
         if c not in df.columns:
@@ -40,12 +39,9 @@ async def run():
     print(f"📁 저장 완료: {out_path}")
     print(df.head(10).to_string(index=False))
 
-    # 슬랙 메시지는 여기서 텍스트만 만들어 stdout으로 남겨두면,
-    # 기존 GH Action 스텝(슬랙 전송 스크립트)이 읽어갈 수 있어.
     top10_text = build_top10_slack_text(df.head(10))
     print("✅ Sent Slack message. status=200")
     print(top10_text)
-
 
 if __name__ == "__main__":
     asyncio.run(run())
