@@ -2,11 +2,11 @@ name: Crawl OY Global (US) and Notify Slack
 
 on:
   schedule:
-    - cron: "0 0 * * *"
+    - cron: "0 0 * * *"  # UTC 00:00 == KST 09:00
   workflow_dispatch:
 
 permissions:
-  contents: write   # ← 추가: actions가 커밋/푸시 가능하도록
+  contents: write
 
 jobs:
   crawl:
@@ -17,7 +17,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          persist-credentials: false   # ← 토큰 충돌 방지
+          persist-credentials: false
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -33,9 +33,14 @@ jobs:
       - name: Run crawler
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-          DROPBOX_ACCESS_TOKEN: ${{ secrets.DROPBOX_ACCESS_TOKEN }}
-          OY_REGION: "US"
+          # --- Google Drive OAuth (필수) ---
+          GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+          # --- 디버그/옵션 ---
           OY_DEBUG: "1"
+          OY_FORCE_US: "0"
         run: |
           python main.py
 
@@ -57,7 +62,7 @@ jobs:
         with:
           name: debug_artifacts
           path: |
-            data/debug/*.png
             data/debug/*.html
+            data/debug/*.csv
             data/debug/*.json
           if-no-files-found: ignore
