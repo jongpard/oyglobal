@@ -1,87 +1,101 @@
 ﻿rank,brand,name,price,price_str,original_price,discount_pct,url
-1,Sign In / Sign Up,Sign In / Sign Up,,,,,
-2,Track Orders,Track Orders,,,,,https://global.oliveyoung.com/member/trackorder
-3,My Wishlist,My Wishlist,,,,,https://global.oliveyoung.com/myaccount/wish
-4,Anua,Anua,,,,,https://global.oliveyoung.com/event/planning?plndpNo=1693
-5,Best,Best,,,,,https://global.oliveyoung.com/display/page/best-seller
-6,New,New,,,,,https://global.oliveyoung.com/display/page/new-arrivals
-7,Sale,Sale,,,,,https://global.oliveyoung.com/display/page/flash-deal
-8,Brands,Brands,,,,,https://global.oliveyoung.com/display/page/brand
-9,Centella Asiatica Extract (Cica Care),Centella Asiatica Extract (Cica Care),,,,,javascript:;
-10,All Skincare,All Skincare,,,,,https://global.oliveyoung.com/display/category?ctgrNo=1000000008
-11,Moisturizers,Moisturizers,,,,,https://global.oliveyoung.com/display/category?ctgrNo=1000000009
-12,Cleansers,Cleansers,,,,,https://global.oliveyoung.com/display/category?ctgrNo=1000000010
-13,Gift Set,Gift Set,,,,,https://global.oliveyoung.com/display/category?ctgrNo=1000000012
-14,Acne & Blemish Treatments,Acne & Blemish Treatments,,,,,https://global.oliveyoung.com/display/category?ctgrNo=1000000261
-15,Combination&Normal,Combination&Normal,,,,,https://global.oliveyoung.com/display/category?query=&attrValNo=AT000037&attrNo=&ctgrNo=1000000008
-16,Dry,Dry,,,,,https://global.oliveyoung.com/display/category?query=&attrValNo=AT000038&attrNo=&ctgrNo=1000000008
-17,Oily,Oily,,,,,https://global.oliveyoung.com/display/category?query=&attrValNo=AT000039&attrNo=&ctgrNo=1000000008
-18,Sensitive,Sensitive,,,,,https://global.oliveyoung.com/display/category?query=&attrValNo=AT000040&attrNo=&ctgrNo=1000000008
-19,Acne,Acne,,,,,https://global.oliveyoung.com/display/category?query=&attrValNo=AT000014&attrNo=&ctgrNo=1000000008
-20,Brightening,Brightening,,,,,https://global.oliveyoung.com/display/category?query=&attrValNo=AT000016&attrNo=&ctgrNo=1000000008
-21,Dullness,Dullness,,,,,https://global.oliveyoung.com/display/category?query=&attrValNo=AT000019&attrNo=&ctgrNo=1000000008
-22,Moisturising,Moisturising,,,,,https://global.oliveyoung.com/display/category?query=&attrValNo=AT000023&attrNo=&ctgrNo=1000000008
-23,Soothing,Soothing,,,,,https://global.oliveyoung.com/display/category?query=&attrValNo=AT000028&attrNo=&ctgrNo=1000000008
-24,Fine Dust Removal,Fine Dust Removal,,,,,https://global.oliveyoung.com/display/category?query=&attrValNo=AT000034&attrNo=&ctgrNo=1000000008
-25,Visible Pores,Visible Pores,,,,,https://global.oliveyoung.com/display/category?query=&attrValNo=AT000032&attrNo=&ctgrNo=1000000008
-26,Well-aging,Well-aging,,,,,https://global.oliveyoung.com/display/category?query=&attrValNo=AT000033&attrNo=&ctgrNo=1000000008
-27,Hyaluronic acid,Hyaluronic acid,,,,,https://global.oliveyoung.com/display/category?query=&attrValNo=AT001122&attrNo=&ctgrNo=1000000008
-28,Panthenol,Panthenol,,,,,https://global.oliveyoung.com/display/category?query=&attrValNo=AT000994&attrNo=&ctgrNo=1000000008
-29,Ceramide,Ceramide,,,,,https://global.oliveyoung.com/display/category?query=&attrValNo=AT000592&attrNo=&ctgrNo=1000000008
-30,Niacinamide,Niacinamide,,,,,https://global.oliveyoung.com/display/category?query=&attrValNo=AT000217&attrNo=&ctgrNo=1000000008
-31,Collagen,Collagen,,,,,https://global.oliveyoung.com/display/category?query=&attrValNo=AT000936&attrNo=&ctgrNo=1000000008
-32,Glutathione in CUSHION!,Glutathione in CUSHION!,,,,,https://global.oliveyoung.com/product/detail?prdtNo=GA250732271
-33,All Makeup,All Makeup,,,,,https://global.oliveyoung.com/display/category?ctgrNo=1000000031
-34,Face,Face,,,,,https://global.oliveyoung.com/display/category?ctgrNo=1000000032
-35,Eye,Eye,,,,,https://global.oliveyoung.com/display/category?ctgrNo=1000000040
-36,Lip,Lip,,,,,https://global.oliveyoung.com/display/category?ctgrNo=1000000045
-37,Nail,Nail,,,,,https://global.oliveyoung.com/display/category?ctgrNo=1000000049
-38,BB & CC Cream,BB & CC Cream,,,,,https://global.oliveyoung.com/display/category?ctgrNo=1000000033
-39,Foundation,Foundation,,,,,https://global.oliveyoung.com/display/category?ctgrNo=1000000034
-40,Makeup Cushion,Makeup Cushion,,,,,https://global.oliveyoung.com/display/category?ctgrNo=1000000179
-41,Face Primer,Face Primer,,,,,https://global.oliveyoung.com/display/category?ctgrNo=1000000035
-42,Powder & Pact,Powder & Pact,,,,,https://global.oliveyoung.com/display/category?ctgrNo=1000000036
-43,Concealer,Concealer,,,,,https://global.oliveyoung.com/display/category?ctgrNo=1000000037
-44,Blush,Blush,,,,,https://global.oliveyoung.com/display/category?ctgrNo=1000000038
-45,Contour,Contour,,,,,https://global.oliveyoung.com/display/category?ctgrNo=1000000039
-46,Eyebrow,Eyebrow,,,,,https://global.oliveyoung.com/display/category?ctgrNo=1000000041
-47,Eyeshadow,Eyeshadow,,,,,https://global.oliveyoung.com/display/category?ctgrNo=1000000042
-48,Eyeliner,Eyeliner,,,,,https://global.oliveyoung.com/display/category?ctgrNo=1000000043
-49,Eyelashes,Eyelashes,,,,,https://global.oliveyoung.com/display/category?ctgrNo=1000000044
-50,Lip Stick,Lip Stick,,,,,https://global.oliveyoung.com/display/category?ctgrNo=1000000046
-51,Lip Gloss & Lip Tint,Lip Gloss & Lip Tint,,,,,https://global.oliveyoung.com/display/category?ctgrNo=1000000047
-52,Lip Balm & Treatment,Lip Balm & Treatment,,,,,https://global.oliveyoung.com/display/category?ctgrNo=1000000048
-53,All Hair,All Hair,,,,,https://global.oliveyoung.com/display/category?ctgrNo=1000000070
-54,Hair Wash,Hair Wash,,,,,https://global.oliveyoung.com/display/category?ctgrNo=1000000071
-55,Treatments,Treatments,,,,,https://global.oliveyoung.com/display/category?ctgrNo=1000000074
-56,Hair Color & Perms,Hair Color & Perms,,,,,https://global.oliveyoung.com/display/category?ctgrNo=1000000079
-57,Hair Styling,Hair Styling,,,,,https://global.oliveyoung.com/display/category?ctgrNo=1000000081
-58,Hair Styling Devices,Hair Styling Devices,,,,,https://global.oliveyoung.com/display/category?ctgrNo=1000000149
-59,Hair Perfume,Hair Perfume,,,,,https://global.oliveyoung.com/display/category?ctgrNo=1000000208
-60,Coloured,Coloured,,,,,https://global.oliveyoung.com/display/category?query=&attrValNo=AT000126&attrNo=&ctgrNo=1000000070
-61,Curly & Wavy,Curly & Wavy,,,,,https://global.oliveyoung.com/display/category?query=&attrValNo=AT000127&attrNo=&ctgrNo=1000000070
-62,Fine,Fine,,,,,https://global.oliveyoung.com/display/category?query=&attrValNo=AT000129&attrNo=&ctgrNo=1000000070
-63,Greying,Greying,,,,,https://global.oliveyoung.com/display/category?query=&attrValNo=AT000131&attrNo=&ctgrNo=1000000070
-64,Hair loss,Hair loss,,,,,https://global.oliveyoung.com/display/category?query=&attrValNo=AT000132&attrNo=&ctgrNo=1000000070
-65,Weakened,Weakened,,,,,https://global.oliveyoung.com/display/category?query=&attrValNo=AT000134&attrNo=&ctgrNo=1000000070
-66,Anti-Dandruff,Anti-Dandruff,,,,,https://global.oliveyoung.com/display/category?query=&attrValNo=AT000135&attrNo=&ctgrNo=1000000070
-67,Anti-Frizz,Anti-Frizz,,,,,https://global.oliveyoung.com/display/category?query=&attrValNo=AT000136&attrNo=&ctgrNo=1000000070
-68,Balancing,Balancing,,,,,https://global.oliveyoung.com/display/category?query=&attrValNo=AT000137&attrNo=&ctgrNo=1000000070
-69,Colour Protection,Colour Protection,,,,,https://global.oliveyoung.com/display/category?query=&attrValNo=AT000138&attrNo=&ctgrNo=1000000070
-70,Damage Repair,Damage Repair,,,,,https://global.oliveyoung.com/display/category?query=&attrValNo=AT000139&attrNo=&ctgrNo=1000000070
-71,Hair Growth,Hair Growth,,,,,https://global.oliveyoung.com/display/category?query=&attrValNo=AT000140&attrNo=&ctgrNo=1000000070
-72,Heat Protection,Heat Protection,,,,,https://global.oliveyoung.com/display/category?query=&attrValNo=AT000141&attrNo=&ctgrNo=1000000070
-73,Hydrating,Hydrating,,,,,https://global.oliveyoung.com/display/category?query=&attrValNo=AT000142&attrNo=&ctgrNo=1000000070
-74,Scalp Treatment,Scalp Treatment,,,,,https://global.oliveyoung.com/display/category?query=&attrValNo=AT000144&attrNo=&ctgrNo=1000000070
-75,Shine,Shine,,,,,https://global.oliveyoung.com/display/category?query=&attrValNo=AT000145&attrNo=&ctgrNo=1000000070
-76,Thickening,Thickening,,,,,https://global.oliveyoung.com/display/category?query=&attrValNo=AT000146&attrNo=&ctgrNo=1000000070
-77,Volumising,Volumising,,,,,https://global.oliveyoung.com/display/category?query=&attrValNo=AT000147&attrNo=&ctgrNo=1000000070
-78,All Face Masks,All Face Masks,,,,,https://global.oliveyoung.com/display/category?ctgrNo=1000000003
-79,Sheet Masks,Sheet Masks,,,,,https://global.oliveyoung.com/display/category?ctgrNo=1000000004
-80,Facial Masks,Facial Masks,,,,,https://global.oliveyoung.com/display/category?ctgrNo=1000000005
-81,Nose Pack,Nose Pack,,,,,https://global.oliveyoung.com/display/category?ctgrNo=1000000006
-82,Patches,Patches,,,,,https://global.oliveyoung.com/display/category?ctgrNo=1000000007
-83,Pads,Pads,,,,,https://global.oliveyoung.com/display/category?ctgrNo=1000000148
-84,Blackheads,Blackheads,,,,,https://global.oliveyoung.com/display/category?query=&attrValNo=AT000015&attrNo=&ctgrNo=1000000003
-85,Deep Cleansing,Deep Cleansing,,,,,https://global.oliveyoung.com/display/category?query=&attrValNo=AT000018&attrNo=&ctgrNo=1000000003
-86,Houttuynia Cordata Extract,Houttuynia Cordata Extract,,,,,https://global.oliveyoung.com/display/category?query=&attrValNo=AT000715&attrNo=&ctgrNo=1000000003
+1,Beauty of Joseon Relief Sun: Rice + Probiotics (SPF50+ PA++++) Double Pack 50mL*2ea,Beauty of Joseon Relief Sun: Rice + Probiotics (SPF50+ PA++++) Double Pack 50mL*2ea,30.0,$30.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA220615265
+2,[TRIPLE] ROUND LAB Birch Juice Moisturizing Sunscreen 50ml Triple Set,[TRIPLE] ROUND LAB Birch Juice Moisturizing Sunscreen 50ml Triple Set,52.0,$52.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA250430113
+3,VT PDRN Reedle Shot Hair Ampoule 15ml 1 out of 3 options,VT PDRN Reedle Shot Hair Ampoule 15ml 1 out of 3 options,67.0,$67.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA250530893
+4,SKIN1004 Madagascar Centella Hyalu-Cica Water-Fit Sun Serum 50mL*2ea (Twin pack),SKIN1004 Madagascar Centella Hyalu-Cica Water-Fit Sun Serum 50mL*2ea (Twin pack),28.0,$28.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA230518746
+5,Beauty of Joseon Relief Sun Aqua Fresh Rice+B5 50ml*2ea,Beauty of Joseon Relief Sun Aqua Fresh Rice+B5 50ml*2ea,30.0,$30.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA241227407
+6,MEDIHEAL Toner Pad 100+100 Pads Double Pack (8types),MEDIHEAL Toner Pad 100+100 Pads Double Pack (8types),44.0,$44.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA220815950
+7,beplain Mung Bean pH-Balancing Cleansing Foam 160ml+160ml,beplain Mung Bean pH-Balancing Cleansing Foam 160ml+160ml,31.0,$31.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA250329175
+8,medicube PDRN Pink Peptide Serum 30ml Refill Set (+Refill Pack 50ml),medicube PDRN Pink Peptide Serum 30ml Refill Set (+Refill Pack 50ml),61.0,$61.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA250530656
+9,goodal Green Tangerine Vita-C Dark Spot Care Serum α 50ml Refill Set (+Cream 10ml),goodal Green Tangerine Vita-C Dark Spot Care Serum α 50ml Refill Set (+Cream 10ml),50.0,$50.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA250732235
+10,AESTURA Atobarrier 365 Cream 80mL,AESTURA Atobarrier 365 Cream 80mL,44.0,$44.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA240121573
+11,Anua Niacinamide 10%+TXA 4% Dark Spot Correcting Serum 30ml Special Set (+PDRN Hyaluronic Capsule 100 Serum 5ml),Anua Niacinamide 10%+TXA 4% Dark Spot Correcting Serum 30ml Special Set (+PDRN Hyaluronic Capsule 100 Serum 5ml),30.0,$30.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA241126972
+12,numbuzin No.5+ Vitamin Concentrated Serum 30mL+30mL Duo Set,numbuzin No.5+ Vitamin Concentrated Serum 30mL+30mL Duo Set,42.0,$42.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA230820183
+13,Dr. Althea 345 Relief Cream 50ml Double Pack,Dr. Althea 345 Relief Cream 50ml Double Pack,70.0,$70.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA250530938
+14,Torriden Dive-In Serum 50ml Refill Set (+Keyring) (Ganadi Collaboration),Torriden Dive-In Serum 50ml Refill Set (+Keyring) (Ganadi Collaboration),42.0,$42.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA250732129
+15,REJURAN Healer Turnover Ampoule Dual Effect 10ml Double Pack (+5ml+1ml*3),REJURAN Healer Turnover Ampoule Dual Effect 10ml Double Pack (+5ml+1ml*3),58.0,$58.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA250329130
+16,Ryo Root:Gen Hair Loss Care Scalp Essence 80mL Double Set,Ryo Root:Gen Hair Loss Care Scalp Essence 80mL Double Set,46.0,$46.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA231221447
+17,SKIN1004 Madagascar Centella Hyalu-Cica Water-Fit Sun Serum 100mL,SKIN1004 Madagascar Centella Hyalu-Cica Water-Fit Sun Serum 100mL,26.0,$26.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA240724745
+18,FOODOLOGY Coleology Cutting Jelly 10 Sticks (+2 Sticks) (12-day supply),FOODOLOGY Coleology Cutting Jelly 10 Sticks (+2 Sticks) (12-day supply),28.0,$28.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA230418329
+19,Dr.G Red Blemish Clear Soothing Cream 70ml 1+1 Set (+Tube 70ml+Serum 10ml+Gel Mask Sheet 1ea+Spot Deco Patch),Dr.G Red Blemish Clear Soothing Cream 70ml 1+1 Set (+Tube 70ml+Serum 10ml+Gel Mask Sheet 1ea+Spot Deco Patch),44.0,$44.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA250531055
+20,Torriden Dive-In Low Molecule Hyaluronic Acid Mask Sheet 10ea,Torriden Dive-In Low Molecule Hyaluronic Acid Mask Sheet 10ea,35.0,$35.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA211012131
+21,LACTO-FIT Probiotics Gold Family Pack 130 Sticks (130-day supply),LACTO-FIT Probiotics Gold Family Pack 130 Sticks (130-day supply),49.0,$49.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA250631353
+22,[Duo Set] numbuzin No. 1 Clear Filter Sun Essence SPF50+ PA++++ 50mL + 50mL Duo Set,[Duo Set] numbuzin No. 1 Clear Filter Sun Essence SPF50+ PA++++ 50mL + 50mL Duo Set,27.0,$27.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA230518528
+23,[Spring EDITION] UNOVE Deep Damage Treatment EX 320ml Duo Set (Cherry Blossom/Tender Bloom),[Spring EDITION] UNOVE Deep Damage Treatment EX 320ml Duo Set (Cherry Blossom/Tender Bloom),49.0,$49.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA250228730
+24,MEDIHEAL Madecassoside Essential Mask Sheet Blemish Repair 10ea Set (+1ea) (OY-Exclusive),MEDIHEAL Madecassoside Essential Mask Sheet Blemish Repair 10ea Set (+1ea) (OY-Exclusive),27.0,$27.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA240824996
+25,Dr.G Red Blemish Clear Soothing Cream & Blemish Soothing Cream Duo Set,Dr.G Red Blemish Clear Soothing Cream & Blemish Soothing Cream Duo Set,44.0,$44.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GS250732273
+26,d'Alba White Truffle First Spray Serum 100mL Double Pack,d'Alba White Truffle First Spray Serum 100mL Double Pack,70.0,$70.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA221016470
+27,Dr.G Red Blemish Clear Soothing Cream & Bakuchiol Pore-Jet Cream Duo Set,Dr.G Red Blemish Clear Soothing Cream & Bakuchiol Pore-Jet Cream Duo Set,44.0,$44.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GS250732274
+28,Dr. Althea 345 Relief Cream 50ml,Dr. Althea 345 Relief Cream 50ml,34.0,$34.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA241227041
+29,[POKEMON EDITION] SUNGBOON EDITOR Green Tomato NMN Pore Lifting Ampoule 40ml Double Pack (+Keyring Pouch),[POKEMON EDITION] SUNGBOON EDITOR Green Tomato NMN Pore Lifting Ampoule 40ml Double Pack (+Keyring Pouch),42.0,$42.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA250732242
+30,UNOVE Deep Damage Repair Shampoo 500g Due Set (Sweet Breeze/Rosy Aura),UNOVE Deep Damage Repair Shampoo 500g Due Set (Sweet Breeze/Rosy Aura),40.0,$40.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA250530907
+31,[DOUBLE] ROUND LAB 1025 Dokdo Cleanser 200ml Double Set,[DOUBLE] ROUND LAB 1025 Dokdo Cleanser 200ml Double Set,34.0,$34.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA220414579
+32,SONATURAL  ALL DAY TIGHT MAKE UP SETTING FIXER 75ml  (No-gas Type),SONATURAL  ALL DAY TIGHT MAKE UP SETTING FIXER 75ml  (No-gas Type),24.0,$24.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA250228724
+33,[Tanning Pompompurin] Hair Loss Care Shampoo Scalp Strenghtening 750ml (+125ml),[Tanning Pompompurin] Hair Loss Care Shampoo Scalp Strenghtening 750ml (+125ml),42.0,$42.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA250631501
+34,Dr.G Red Blemish Clear Soothing Cream & Moisture Cream Duo Set,Dr.G Red Blemish Clear Soothing Cream & Moisture Cream Duo Set,44.0,$44.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GS250732272
+35,BIODANCE Bio Collagen Real Deep Mask Sheet 16P,BIODANCE Bio Collagen Real Deep Mask Sheet 16P,83.0,$83.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA230518544
+36,ma:nyo Pure Cleansing Oil 200ml Double Pack,ma:nyo Pure Cleansing Oil 200ml Double Pack,43.0,$43.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA240724566
+37,MEDIHEAL Collagen Essential Mask Sheet Core Firming 20ea,MEDIHEAL Collagen Essential Mask Sheet Core Firming 20ea,53.0,$53.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA250429964
+38,rom&nd The Juicy Lasting Tint 3.5g,rom&nd The Juicy Lasting Tint 3.5g,16.99,$16.99,,,https://global.oliveyoung.com/product/detail?prdtNo=GA241126576
+39,Arencia Fresh Green Rice Mochi Cleanser 120g Set (+Rosehip Cleanser 15g),Arencia Fresh Green Rice Mochi Cleanser 120g Set (+Rosehip Cleanser 15g),23.0,$23.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA241227085
+40,d'Alba Waterful Tone Up Sun Cream Purple 50mL Duo Set,d'Alba Waterful Tone Up Sun Cream Purple 50mL Duo Set,59.0,$59.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA240222109
+41,ILLIYOON Ceramide Ato Lotion 334mL + 100mL,ILLIYOON Ceramide Ato Lotion 334mL + 100mL,22.0,$22.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA210911943
+42,DERMALINE D'LEXO PDRN Solution Activating Toner 200 ml,DERMALINE D'LEXO PDRN Solution Activating Toner 200 ml,64.0,$64.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA241026314
+43,SKIN1004 Madagascar Centella Ampoule 100ml,SKIN1004 Madagascar Centella Ampoule 100ml,22.0,$22.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA250127893
+44,CLIO Sharp So Simple Waterproof Pencil Liner,CLIO Sharp So Simple Waterproof Pencil Liner,11.0,$11.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA240121726
+45,UNOVE Deep Damage Treatment EX 320mL Double Pack,UNOVE Deep Damage Treatment EX 320mL Double Pack,49.0,$49.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA220916169
+46,ROUND LAB Birch Juice Moisturizing Cream 120mL Jumbo Size Set (+Birch Juice Moisturizing Pad*4ea),ROUND LAB Birch Juice Moisturizing Cream 120mL Jumbo Size Set (+Birch Juice Moisturizing Pad*4ea),50.0,$50.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA220514793
+47,MEDIHEAL Toner Pad 100+200 Pads Triple Pack (3types),MEDIHEAL Toner Pad 100+200 Pads Triple Pack (3types),70.0,$70.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA240624205
+48,Anua PDRN Hyaluronic Capsule 100 Serum 30ml Refill Set,Anua PDRN Hyaluronic Capsule 100 Serum 30ml Refill Set,48.0,$48.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA250329148
+49,Anua Heartleaf Pore Control Cleansing Oil 350mL,Anua Heartleaf Pore Control Cleansing Oil 350mL,34.0,$34.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA231020697
+50,[POKEMON EDITION] SUNGBOON EDITOR Silk Peptide EGF Heart-Fit Volume Lifting Ampoule 40ml Double Pack (+Keyring Pouch),[POKEMON EDITION] SUNGBOON EDITOR Silk Peptide EGF Heart-Fit Volume Lifting Ampoule 40ml Double Pack (+Keyring Pouch),50.0,$50.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA250732363
+51,ROUND LAB Birch Juice Moisturizing Sun Stick 19g Double Set,ROUND LAB Birch Juice Moisturizing Sun Stick 19g Double Set,32.61,$32.61,,,https://global.oliveyoung.com/product/detail?prdtNo=GA240322554
+52,ongredients Skin Barrier Calming Lotion Set (220ml+80ml),ongredients Skin Barrier Calming Lotion Set (220ml+80ml),47.0,$47.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA240623982
+53,3CE Fitting Mesh Cushion,3CE Fitting Mesh Cushion,41.0,$41.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA240724655
+54,ROUND LAB 1025 Dokdo Toner Jumbo Size 500ml (Free Gift: Toner 100ml),ROUND LAB 1025 Dokdo Toner Jumbo Size 500ml (Free Gift: Toner 100ml),36.0,$36.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA210002626
+55,VT Reedle Shot 100 Essence 50mL Set (+Reedle Shot 300 1ml*3 +PDRN Essence 1.5ml*3),VT Reedle Shot 100 Essence 50mL Set (+Reedle Shot 300 1ml*3 +PDRN Essence 1.5ml*3),32.0,$32.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA250631564
+56,[TANNING KUROMI EDITION] MEDIHEAL PDRN Lifting Pad 100P Double Pack (+Market Bag),[TANNING KUROMI EDITION] MEDIHEAL PDRN Lifting Pad 100P Double Pack (+Market Bag),47.0,$47.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA250631467
+57,beauty of joseon Matte sun stick : Mugwort + Camelia Double Pack,beauty of joseon Matte sun stick : Mugwort + Camelia Double Pack,30.0,$30.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA240825347
+58,VT Reedle Shot 300 Essence 50mL,VT Reedle Shot 300 Essence 50mL,44.0,$44.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA230820054
+59,medicube Zero Pore Pad 2.0 70P Refill Set,medicube Zero Pore Pad 2.0 70P Refill Set,44.0,$44.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA240624216
+60,BIODANCE Bio-Collagen Real Deep Mask Sheet 7P Set (+Sea Kelp Mask),BIODANCE Bio-Collagen Real Deep Mask Sheet 7P Set (+Sea Kelp Mask),37.0,$37.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA250631719
+61,Isntree Hyaluronic Acid Watery Sun Gel Double Set (50mL+50mL),Isntree Hyaluronic Acid Watery Sun Gel Double Set (50mL+50mL),39.1,$39.10,,,https://global.oliveyoung.com/product/detail?prdtNo=GA230920295
+62,Dr.G Green Mild Up Sun+ Special Set,Dr.G Green Mild Up Sun+ Special Set,32.0,$32.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA230217716
+63,S.NATURE Aqua Squalane Moisturizing Cream 60ml Triple Pack (+Calming Pad 2P),S.NATURE Aqua Squalane Moisturizing Cream 60ml Triple Pack (+Calming Pad 2P),76.0,$76.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA250531040
+64,d'Alba Waterfull Tone-Up Sun Cream Duo Set (50mL+50mL),d'Alba Waterfull Tone-Up Sun Cream Duo Set (50mL+50mL),59.0,$59.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA220414400
+65,ilso Super Melting Sebum Softener 150ml Set (+Cotton Pad 40P+Pore Tension Mask Sheet 1ea),ilso Super Melting Sebum Softener 150ml Set (+Cotton Pad 40P+Pore Tension Mask Sheet 1ea),31.0,$31.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA250530726
+66,S.NATURE Aqua Squalane Moisturizing Cream 60ml Double Pack (+Aqua Gel Mask Sheet 1ea),S.NATURE Aqua Squalane Moisturizing Cream 60ml Double Pack (+Aqua Gel Mask Sheet 1ea),50.0,$50.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA250732245
+67,ROUND LAB BIRCH JUICE MOISTURIZING SUNSCREEN 50ml Set,ROUND LAB BIRCH JUICE MOISTURIZING SUNSCREEN 50ml Set,30.0,$30.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA210004685
+68,BIOHEAL BOH Probioderm 3D Lifting Cream 50mL Refill Set,BIOHEAL BOH Probioderm 3D Lifting Cream 50mL Refill Set,56.0,$56.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA240121787
+69,lilyeve Grow Turn Ampoule 100ml Set (+Refill 100ml),lilyeve Grow Turn Ampoule 100ml Set (+Refill 100ml),46.0,$46.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA250228571
+70,[1+1] House of Hur Weightless Sun Fluid 50ml,[1+1] House of Hur Weightless Sun Fluid 50ml,29.0,$29.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GS250631495
+71,Flimeal Protein Shake 45g,Flimeal Protein Shake 45g,5.0,$5.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA240122024
+72,CAREPLUS Scar Cover Spot Patch 324P (RENEWAL),CAREPLUS Scar Cover Spot Patch 324P (RENEWAL),21.0,$21.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA250329366
+73,Torriden Dive In Serum 50mL Special Set (+Multi Pad 10P),Torriden Dive In Serum 50mL Special Set (+Multi Pad 10P),26.0,$26.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA230920410
+74,Seapuri Dr. 33 Hair Ampoule 20ml 1+1 Set,Seapuri Dr. 33 Hair Ampoule 20ml 1+1 Set,48.0,$48.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA241026134
+75,[GANADI EDITION] Torriden Dive-In Low Molecular Hyaluronic Acid Soothing Cream 100ml Double Pack (+Pouch Keyring),[GANADI EDITION] Torriden Dive-In Low Molecular Hyaluronic Acid Soothing Cream 100ml Double Pack (+Pouch Keyring),49.0,$49.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA250732128
+76,Centellian24 Madeca Cream Time Reverse Special Set (Madeca Lab Mask Sheet 1P+ Time Reverse Cream 15mL),Centellian24 Madeca Cream Time Reverse Special Set (Madeca Lab Mask Sheet 1P+ Time Reverse Cream 15mL),44.0,$44.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA240121791
+77,AESTURA Derma UV365 Barrier Hydro Mineral Sunscreen 40ml Set (+20ml),AESTURA Derma UV365 Barrier Hydro Mineral Sunscreen 40ml Set (+20ml),41.0,$41.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA240624151
+78,Celimax The Real Noni Energy Ampoule 80ml Special Set (+Ampoule 10ml),Celimax The Real Noni Energy Ampoule 80ml Special Set (+Ampoule 10ml),39.0,$39.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA240423022
+79,ILLIYOON Fresh Moisture Scrub Wash 400ml*2ea Set,ILLIYOON Fresh Moisture Scrub Wash 400ml*2ea Set,30.0,$30.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA250430397
+80,Beauty of Joseon Revive Eye Serum Ginseng + Retinol 30mL,Beauty of Joseon Revive Eye Serum Ginseng + Retinol 30mL,17.0,$17.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA220816048
+81,[Tanning Cinnamoroll] Curl Fix Mascara 1+1 (+Mini Mascara),[Tanning Cinnamoroll] Curl Fix Mascara 1+1 (+Mini Mascara),16.0,$16.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA250631684
+82,SKINFOOD Carrot Carotene Calming Water Pad 60P Double Set,SKINFOOD Carrot Carotene Calming Water Pad 60P Double Set,49.0,$49.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA250430137
+83,MEDIHEAL Toner Pad 100 Pads (7types Madecassoside Collagen etc),MEDIHEAL Toner Pad 100 Pads (7types Madecassoside Collagen etc),35.0,$35.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA220815951
+84,FOODOLOGY Coleology PRO 600mg*60 Tablets (1-month supply),FOODOLOGY Coleology PRO 600mg*60 Tablets (1-month supply),53.0,$53.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA250631343
+85,JUNGSAEMMOOL Essential Skin Nuder Cushion,JUNGSAEMMOOL Essential Skin Nuder Cushion,45.0,$45.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA210002919
+86,SKIN1004 Madagascar Centella Light Cleansing Oil 200mL,SKIN1004 Madagascar Centella Light Cleansing Oil 200mL,22.0,$22.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA220113369
+87,Anua Heartleaf Quercetinol Pore Deep Cleansing Foam 150ml (+25ml),Anua Heartleaf Quercetinol Pore Deep Cleansing Foam 150ml (+25ml),13.0,$13.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA240724586
+88,SKIN1004 Perfect Suncare Kit (Sun serum 50ml+Sun stick 20g+Cleansing oil 30ml+Cleansing Foam 20ml),SKIN1004 Perfect Suncare Kit (Sun serum 50ml+Sun stick 20g+Cleansing oil 30ml+Cleansing Foam 20ml),41.0,$41.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA241126581
+89,SUNGBOON EDITOR Top-Selling Set,SUNGBOON EDITOR Top-Selling Set,168.35,$168.35,,,https://global.oliveyoung.com/product/detail?prdtNo=GA250732435
+90,espoir Be Velvet Cover Cushion (+Refill),espoir Be Velvet Cover Cushion (+Refill),40.0,$40.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA231121068
+91,goodal Green Tangerine Vita-C Dark Spot Care Serum α 50ml Set (+35ml),goodal Green Tangerine Vita-C Dark Spot Care Serum α 50ml Set (+35ml),50.0,$50.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA250731969
+92,BRINGGREEN Zinc Teca Blemish Serum 50ml + Refill 25ml (+Tea Tree Pads 20P+Pad Case),BRINGGREEN Zinc Teca Blemish Serum 50ml + Refill 25ml (+Tea Tree Pads 20P+Pad Case),65.0,$65.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA250228437
+93,HERA Black Cushion Refill 15g,HERA Black Cushion Refill 15g,38.0,$38.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA240825269
+94,ILLIYOON Cearmide Ato Concentrate Cream 150mL*2ea,ILLIYOON Cearmide Ato Concentrate Cream 150mL*2ea,29.0,$29.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA250127972
+95,Dr.G Red Blemish Soothing Up Sun 50mL 1+1 Special Set,Dr.G Red Blemish Soothing Up Sun 50mL 1+1 Special Set,33.0,$33.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA240222102
+96,numbuzin No. 9 NAD Bio Lifting-sil Essence 50ml,numbuzin No. 9 NAD Bio Lifting-sil Essence 50ml,33.0,$33.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA250127641
+97,[NEW] LANEIGE Neo Essential Blurring Finish Powder 7g,[NEW] LANEIGE Neo Essential Blurring Finish Powder 7g,32.0,$32.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA230217651
+98,INNISFREE Retinol Cica Repair Ampoule 30ml Double Pack,INNISFREE Retinol Cica Repair Ampoule 30ml Double Pack,61.0,$61.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA250732068
+99,BB LAB Low Molecular Collagen S 30 Sticks Double Pack (60-day supply),BB LAB Low Molecular Collagen S 30 Sticks Double Pack (60-day supply),45.0,$45.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA240724756
+100,MEDIHEAL Collagen Essential Mask Sheet Core Firming 10ea Set (1ea),MEDIHEAL Collagen Essential Mask Sheet Core Firming 10ea Set (1ea),27.0,$27.00,,,https://global.oliveyoung.com/product/detail?prdtNo=GA250329470
