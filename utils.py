@@ -2,6 +2,12 @@ import os, glob, pytz, json, requests, pandas as pd
 from datetime import datetime
 from typing import Optional
 
+# --- 새로 추가: gdrive_upload_oauth 를 gdrive_upload.py 에서 가져와서 래핑 ---
+try:
+    from gdrive_upload import gdrive_upload_oauth as _gdrive_upload_oauth
+except Exception:
+    _gdrive_upload_oauth = None
+
 SEOUL = pytz.timezone("Asia/Seoul")
 
 def ensure_dirs():
@@ -11,6 +17,7 @@ def ensure_dirs():
 def get_kst_today_str() -> str:
     return datetime.now(SEOUL).strftime("%Y-%m-%d")
 
+# ---- CSV 저장/로드 ----
 def _reorder_cols(df: pd.DataFrame) -> pd.DataFrame:
     want = ["rank","brand","name","original_price","sale_price","discount_pct","url","raw_name"]
     for c in want:
@@ -37,7 +44,7 @@ def load_previous_csv(path_today: str):
             return None, prev_path
     return None, None
 
-# ---------- Slack ----------
+# ---------- Slack 블록 구성 ----------
 def _fmt_usd(v) -> str:
     try: return f"US${float(v):.2f}"
     except Exception: return ""
@@ -47,7 +54,7 @@ def compute_diffs_and_blocks(df_today: pd.DataFrame, df_prev: Optional[pd.DataFr
     date_line = f"_기준: {get_kst_today_str()} (KST)_"
     blocks = [{"type":"section","text":{"type":"mrkdwn","text":f"{header}\n{date_line}"}}]
 
-    # Top10 – 한 줄 고정(의도적 개행 없음)
+    # Top10 – 각 항목 한 줄(강제 개행 없음)
     t10 = df_today.nsmallest(10, "rank").copy().reset_index(drop=True)
     lines = []
     for i, r in t10.iterrows():
@@ -72,13 +79,13 @@ def compute_diffs_and_blocks(df_today: pd.DataFrame, df_prev: Optional[pd.DataFr
         text = "\n".join(b["text"]["text"] for b in blocks if "text" in b)
         return blocks, text
 
-    # 이하 비교 섹션은 동일
+    # 비교 섹션 (기존 로직)
     kt, kp = df_today.copy(), df_prev.copy()
     kt["key"] = kt["url"].fillna("") + "||" + kt["brand"].fillna("") + "||" + kt["name"].fillna("")
     kp["key"] = kp["url"].fillna("") + "||" + kp["brand"].fillna("") + "||" + kp["name"].fillna("")
     merged = pd.merge(kt[["rank","key","name","url"]], kp[["rank","key"]], on="key", how="left", suffixes=("_today","_prev"))
     merged["rank_prev"] = merged["rank_prev"].astype("Int64")
-    movers = merged[merged["rank_prev"] .notna()].copy()
+    movers = merged[merged["rank_prev"].notna()].copy()
     movers["delta"] = (movers["rank_prev"] - movers["rank_today"]).astype(int)
 
     up10 = movers.sort_values("delta", ascending=False).head(10)
@@ -105,3 +112,14 @@ def compute_diffs_and_blocks(df_today: pd.DataFrame, df_prev: Optional[pd.DataFr
 
     text = "\n".join(b["text"]["text"] for b in blocks if "text" in b)
     return blocks, text
+
+# ---- Google Drive 업로드: utils에서 그대로 사용할 수 있게 래핑 ----
+def gdrive_upload_oauth(local_path: str, folder_id: str, client_id: str, client_secret: str, refresh_token: str):
+    """
+    main.py 는 기존처럼 utils.gdrive_upload_oauth 를 호출합니다.
+    실제 구현은 gdrive_upload.py 의 gdrive_upload_oauth 를 위에서 import 하여 위임합니다.
+    """
+    if _gdrive_upload_oauth is None:
+        print("[WARN] gdrive_upload_oauth not available (gdrive_upload.py import 실패)")
+        return
+    return _gdrive_upload_oauth(local_path, folder_id, client_id, client_secret, refresh_token)
