@@ -3,10 +3,10 @@ pandas==2.2.2
 python-dateutil==2.9.0.post0
 pytz==2024.1
 
-# Google Drive 업로드용
 google-api-python-client==2.137.0
 google-auth==2.32.0
 google-auth-httplib2==0.2.0
+# (인터랙티브 인증은 안 쓰지만 호환성 위해 포함해도 무방)
+google-auth-oauthlib==1.2.0
 
-# Slack 웹훅/HTTP
 requests==2.32.3
