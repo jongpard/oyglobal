@@ -21,7 +21,7 @@ async def _new_context(pw) -> BrowserContext:
     return context
 
 async def _try_close_overlays(page):
-    # 쿠키 배너/팝업 닫기(있으면)
+    # 쿠키/팝업 닫기 (있을 때만)
     selectors = [
         "button:has-text('Accept All')",
         "button:has-text('Accept')",
@@ -32,30 +32,49 @@ async def _try_close_overlays(page):
     for sel in selectors:
         try:
             if await page.is_visible(sel):
-                await page.click(sel, timeout=1000)
-                await asyncio.sleep(0.3)
+                await page.click(sel, timeout=500)
+                await asyncio.sleep(0.2)
         except:
             pass
 
-async def _soft_wait(page, selector, timeout=15000):
-    # visible 대신 attached로 완화(가시성 이슈 방지)
+async def _wait_attached(page, selector, timeout=15000) -> bool:
     try:
         await page.wait_for_selector(selector, state="attached", timeout=timeout)
         return True
     except:
         return False
 
+async def _get_trending_boundary_y(page) -> float:
+    """
+    'What's trending in Korea?' 섹션의 y 좌표를 얻어,
+    그 아래 카드들은 무시한다. 없으면 매우 큰 값 반환.
+    """
+    candidates = [
+        "text=What's trending in Korea?",
+        "text=What’s trending in Korea?"
+    ]
+    for sel in candidates:
+        try:
+            el = await page.query_selector(sel)
+            if el:
+                bb = await el.bounding_box()
+                if bb:
+                    return bb["y"]
+        except:
+            continue
+    return 1e12  # sentinel
+
 async def scrape_oliveyoung_global() -> List[Dict]:
     async with async_playwright() as pw:
         context = await _new_context(pw)
         page = await context.new_page()
 
-        # 진입 및 초기 로드 대기 강화
+        # 진입
         await page.goto(BEST_URL, wait_until="domcontentloaded", timeout=90000)
         await _try_close_overlays(page)
         await page.wait_for_load_state("networkidle")
 
-        # 베스트셀러 탭 루트가 있으면 그 안에서 대기
+        # 베스트 섹션 루트 대기(느슨하게)
         root_sel_candidates = [
             "#pillsTab1Nav1",
             "[id*='pillsTab1']",
@@ -63,42 +82,49 @@ async def scrape_oliveyoung_global() -> List[Dict]:
         ]
         root = None
         for sel in root_sel_candidates:
-            ok = await _soft_wait(page, sel, timeout=8000)
-            if ok:
+            if await _wait_attached(page, sel, timeout=7000):
                 root = sel
                 break
 
-        # 어쨌든 제품 a태그가 DOM에 붙을 때까지 느슨히 대기 (가시성 X)
-        await _soft_wait(page, "a[href*='product/detail']", timeout=15000)
+        # 제품 상세 링크가 DOM에 붙을 때까지(가시성 X)
+        await _wait_attached(page, "a[href*='product/detail']", timeout=15000)
 
-        # 지연 로딩 대비 스크롤 충분히
-        # (상황에 따라 10~14회까지 증가)
+        # 지연 로딩 대비 충분히 스크롤
         for _ in range(12):
             await page.mouse.wheel(0, 2600)
             await asyncio.sleep(0.9)
 
-        # 검색 범위: 가능한 경우 루트 내부를 우선, 아니면 문서 전체
+        trending_y = await _get_trending_boundary_y(page)
+
+        # 링크 자체를 기준으로 수집 (타일 대부분이 a로 래핑됨)
         scope_prefix = f"{root} " if root else ""
-        # 카드 후보 넓게 수집(배너/기획전도 섞여 있으므로 아래에서 가격 필터링)
-        cards = await page.query_selector_all(f"{scope_prefix}li, {scope_prefix}div, {scope_prefix}article")
+        links = await page.query_selector_all(f"{scope_prefix}a[href*='product/detail']")
 
         items: List[Dict] = []
+        seen = set()  # 중복 URL 제거
         rank = 0
 
-        for card in cards:
+        for a in links:
             try:
-                # 제품 상세 링크
-                a = await card.query_selector("a[href*='product/detail']")
-                if not a:
+                # 트렌딩 섹션 아래는 무시
+                bb = await a.bounding_box()
+                if bb and bb["y"] >= trending_y:
                     continue
+
                 href = await a.get_attribute("href")
-                if not href or "product/detail" not in href:
+                if not href:
                     continue
                 product_url = href if href.startswith("http") else f"https://global.oliveyoung.com{href}"
+                if product_url in seen:
+                    continue
+                seen.add(product_url)
+
+                # 카드 컨테이너 (브랜드/이름/이미지/가격)
+                card = await a.evaluate_handle("el => el.closest('li,div,article') || el")
 
                 # 이미지
-                img = await card.query_selector("img")
-                img_url = (await img.get_attribute("src")) if img else None
+                img_el = await card.query_selector("img")
+                img_url = (await img_el.get_attribute("src")) if img_el else None
 
                 # 브랜드/이름
                 brand = None
@@ -122,11 +148,14 @@ async def scrape_oliveyoung_global() -> List[Dict]:
                     t = (await a.inner_text()).strip()
                     product_name = re.sub(r"\s+", " ", t)
 
-                # 가격 블록 텍스트
-                price_block = await card.inner_text()
+                # 가격 텍스트: a 내부 + 부모컨테이너 텍스트 모두 포함
+                txt_a = (await a.inner_text()).replace("\n", " ")
+                txt_card = await card.evaluate("el => (el.innerText || '').replace(/\\n/g, ' ')")
+                price_block = (txt_card or "") + " " + (txt_a or "")
+
                 price_info = parse_prices_and_discount(price_block)
 
-                # 가격 정보 없는(배너 등) 카드는 스킵
+                # 가격 없으면 배너/기획전 → 스킵
                 if price_info.get("price_current_usd") is None:
                     continue
 
@@ -148,7 +177,6 @@ async def scrape_oliveyoung_global() -> List[Dict]:
                 continue
 
         await context.close()
-        # 정렬 및 정리
-        items = [it for it in items if it["rank"] > 0]
+
         items.sort(key=lambda x: x["rank"])
         return items
