@@ -1,222 +1,314 @@
 # oy_global.py
+# Olive Young Global Top Orders (Best Sellers) scraper
+# - Top Orders 영역만 1~100위 수집
+# - CSV 저장 전 brand 컬럼 정규화(브랜드명만 남김)
+
 import asyncio
-from typing import List, Dict
-from playwright.async_api import async_playwright
-from utils import kst_today_str
+import math
+import os
+import re
+from datetime import datetime, timezone, timedelta
+from typing import Dict, List
 
-BEST_URL = "https://global.oliveyoung.com/display/page/best-seller?target=pillsTab1Nav1"
+import pandas as pd
+from playwright.async_api import async_playwright, Page
 
-JS_EXTRACT = r"""
-() => {
-  const asNum = (s) => {
-    if (!s) return null;
-    const m = String(s).match(/([\d,]+(?:\.\d{2})?)/);
-    if (!m) return null;
-    return parseFloat(m[1].replace(/,/g, ""));
-  };
-  const inRange = (v) => typeof v === "number" && v >= 0.5 && v <= 500;
-  const scrollTop = () => window.pageYOffset || document.documentElement.scrollTop || document.body.scrollTop || 0;
-  const absTop = (el) => (el.getBoundingClientRect().top + scrollTop());
-  const isVisible = (el) => {
-    if (!el) return false;
-    const st = getComputedStyle(el);
-    if (st.visibility === "hidden" || st.display === "none") return false;
-    const r = el.getBoundingClientRect();
-    return r.width > 0 && r.height > 0;
-  };
 
-  // --------- 트렌딩 섹션 루트 찾기(가시 요소만) ----------
-  const headAll = Array.from(document.querySelectorAll("body *"))
-    .filter(el => /what.?s\s+trending\s+in\s+korea/i.test((el.textContent || "").trim()))
-    .filter(isVisible)
-    .sort((a,b)=>absTop(a)-absTop(b));
+BASE_URL = "https://global.oliveyoung.com/"
+DATA_DIR = "data"
+MAX_RANK = int(os.getenv("MAX_RANK", "100"))  # 100위까지
+SCROLL_PAUSE = 300  # ms
 
-  let trendingRoot = null;
-  if (headAll.length) {
-    let cur = headAll[0];
-    // 헤더에서 위로 올라가며 "적정 수의 상품 링크"를 품은 조상 선택
-    for (let i=0; i<12 && cur; i++, cur = cur.parentElement) {
-      const cnt = cur.querySelectorAll("a[href*='product/detail']").length;
-      if (cnt >= 6 && cnt <= 80) { trendingRoot = cur; break; }
+
+# ---------- utils ----------
+def kst_today_str() -> str:
+    KST = timezone(timedelta(hours=9))
+    return datetime.now(KST).strftime("%Y-%m-%d")
+
+
+def _parse_price_usd(text: str) -> float:
+    """문자열에서 US$ 금액 추출 -> float (없으면 NaN)"""
+    if not text:
+        return float("nan")
+    m = re.search(r"US\$ ?([0-9][0-9,]*\.?[0-9]*)", text, flags=re.I)
+    return float(m.group(1).replace(",", "")) if m else float("nan")
+
+
+def _clean_spaces(s: str) -> str:
+    if s is None:
+        return ""
+    s = re.sub(r"\s+", " ", str(s)).strip()
+    return s
+
+
+def _clean_brand_value(brand: str, product_name: str) -> str:
+    """
+    brand 칸에 상품명이 섞여 들어오는 문제 정리:
+    - 여러 줄로 들어오면 '첫 번째 비어있지 않은 줄'만 사용
+    - product_name이 섞여 있으면 제거
+    - 공백/개행 정리
+    """
+    if brand is None:
+        return ""
+    text = str(brand)
+
+    # 1) 첫 줄만
+    first_non_empty = ""
+    for part in text.splitlines():
+        part = part.strip()
+        if part:
+            first_non_empty = part
+            break
+    text = first_non_empty or text.strip()
+
+    # 2) product_name이 포함되어 있으면 제거(공백 정규화 후 대소문자 무시)
+    if isinstance(product_name, str) and product_name:
+        pn = re.sub(r"\s+", " ", product_name).strip()
+        tt = re.sub(r"\s+", " ", text).strip()
+        if pn and pn.lower() in tt.lower():
+            pattern = re.compile(re.escape(pn), flags=re.I)
+            tt = pattern.sub("", tt).strip()
+            if tt:
+                text = tt
+
+    # 3) 공백 정리
+    return _clean_spaces(text)
+
+
+async def _ensure_top_orders_only(page: Page) -> None:
+    """
+    'Top Orders / Best Sellers' 영역이 다 로드되도록 스크롤.
+    'What's trending in Korea?' 헤더가 보이면 그 지점까지만 로드했다고 판단.
+    """
+    # 페이지에 첫 카드 뜰 때까지
+    await page.wait_for_selector("a[href*='product']")
+
+    # 스크롤로 카드 로드
+    for _ in range(40):
+        # 'What's trending in Korea?' 섹션이 보이면 종료
+        trending = page.locator("text=/what\\'s trending in korea\\?/i")
+        if await trending.first.is_visible():
+            break
+        await page.evaluate("window.scrollBy(0, 1200)")
+        await page.wait_for_timeout(SCROLL_PAUSE)
+
+
+async def _extract_cards_in_top_orders(page: Page):
+    """
+    Top Orders(=Best Sellers) 그리드 내 카드 컨테이너들을 반환
+    - 'What's trending in Korea?' 이전 영역의 카드만 수집
+    """
+    # Top Orders/Best Sellers 헤더 기준으로 영역 잡기(다양한 DOM 대응)
+    top_area = None
+    for sel in [
+        "section:has(h2:has-text('Top Orders'))",
+        "section:has(h2:has-text('Best Sellers'))",
+        "div:has(> h2:has-text('Top Orders'))",
+        "div:has(> h2:has-text('Best Sellers'))",
+    ]:
+        loc = page.locator(sel)
+        if await loc.count():
+            top_area = loc.first
+            break
+
+    # 못 찾으면 화면 상단부터 트렌딩 헤더 전까지를 사용
+    if not top_area:
+        # 트렌딩 헤더의 y 좌표
+        trending = page.locator("text=/what\\'s trending in korea\\?/i")
+        trending_top = await trending.bounding_box()
+        cutoff_y = trending_top["y"] if trending_top else math.inf
+
+        cards = []
+        all_cards = page.locator("a[href*='product']").locator("..")  # 카드 컨테이너(앵커의 부모)
+        count = await all_cards.count()
+        for i in range(count):
+            c = all_cards.nth(i)
+            box = await c.bounding_box()
+            if box and box["y"] < cutoff_y:
+                cards.append(c)
+        return cards
+
+    # top_area 내부의 카드만
+    cards = top_area.locator("a[href*='product']").locator("..")
+    arr = [cards.nth(i) for i in range(await cards.count())]
+    return arr
+
+
+async def _card_to_item(card, rank: int) -> Dict:
+    """개별 카드에서 필요한 정보 추출"""
+    # 브랜드/상품명
+    brand_txt = await card.locator("text").first.inner_text()
+    # 브랜드/상품명을 개별 영역에서 잡으려 시도
+    brand = ""
+    name = ""
+
+    # 1) 흔한 구조: 브랜드/상품명 각각 엘리먼트가 있음
+    for b_sel in [".brand", ".prd_brand", "strong.brand", "span.brand"]:
+        if await card.locator(b_sel).count():
+            brand = await card.locator(b_sel).first.inner_text()
+            break
+    for n_sel in [".name", ".prd_name", ".title", "strong.name", "a.name"]:
+        if await card.locator(n_sel).count():
+            name = await card.locator(n_sel).first.inner_text()
+            break
+
+    # 2) 그래도 못 잡았으면 카드 전체 텍스트에서 첫 줄/둘째 줄 추론
+    if not brand or not name:
+        lines = [ln.strip() for ln in brand_txt.splitlines() if ln.strip()]
+        if not brand and lines:
+            brand = lines[0]
+        if not name and len(lines) >= 2:
+            name = lines[1]
+
+    brand = _clean_spaces(brand)
+    name = _clean_spaces(name)
+
+    # 현재가, 원가, 밸류(적립) 가격
+    whole_text = await card.inner_text()
+    # Value: US$xx.xx
+    value_price_usd = _parse_price_usd(re.search(r"Value[:：]\s*US\$ ?[0-9,\.]+", whole_text, flags=re.I).group(0)) \
+        if re.search(r"Value[:：]\s*US\$ ?[0-9,\.]+", whole_text, flags=re.I) else float("nan")
+    has_value_price = not math.isnan(value_price_usd)
+
+    # 취소선/원가 후보
+    orig = float("nan")
+    for o_sel in ["s:has-text('US$')", "del:has-text('US$')"]:
+        if await card.locator(o_sel).count():
+            try:
+                o_text = await card.locator(o_sel).first.inner_text()
+                orig = _parse_price_usd(o_text)
+                break
+            except Exception:
+                pass
+
+    # 현재가 후보
+    cur = float("nan")
+    # 가격 텍스트만 있는 요소를 우선
+    price_node = None
+    for p_sel in [
+        "strong:has-text('US$')", ".price:has-text('US$')",
+        "span:has-text('US$')", "p:has-text('US$')"
+    ]:
+        if await card.locator(p_sel).count():
+            price_node = card.locator(p_sel).first
+            break
+    if price_node:
+        cur = _parse_price_usd(await price_node.inner_text())
+
+    # 그래도 못 잡으면 카드 전체에서 금액 2개 이상 뽑아 추정
+    if math.isnan(cur):
+        prices = re.findall(r"US\$ ?([0-9][0-9,]*\.?[0-9]*)", whole_text)
+        if prices:
+            # 보통 현재가가 더 진하게/하단에 노출되므로 마지막 값을 현재가로 사용
+            cur = float(prices[-1].replace(",", ""))
+            if len(prices) >= 2 and math.isnan(orig):
+                orig = float(prices[-2].replace(",", ""))
+
+    # Value 가격을 원가로 대체(광고성 밸류 값이 있을 때)
+    price_original = orig
+    if has_value_price and not math.isnan(value_price_usd):
+        price_original = value_price_usd
+
+    discount_rate_pct = float("nan")
+    if (price_original and not math.isnan(price_original)) and (cur and not math.isnan(cur)) and price_original > 0:
+        discount_rate_pct = round((1 - (cur / price_original)) * 100, 2)
+
+    # 링크/이미지
+    a = card.locator("a[href*='product']").first
+    product_url = ""
+    try:
+        product_url = await a.get_attribute("href") or ""
+    except Exception:
+        pass
+    if product_url and product_url.startswith("/"):
+        product_url = BASE_URL.rstrip("/") + product_url
+
+    image_url = ""
+    for img_sel in ["img", "picture img", "img.prd_img"]:
+        if await card.locator(img_sel).count():
+            image_url = await card.locator(img_sel).first.get_attribute("src") or ""
+            break
+
+    # 브랜드 칸 정규화(여기서는 name 참고만, 본 확정은 DataFrame에서 한 번 더 수행)
+    brand = _clean_brand_value(brand, name)
+
+    return {
+        "date_kst": kst_today_str(),
+        "rank": rank,
+        "brand": brand,
+        "product_name": name,
+        "price_current_usd": cur,
+        "price_original_usd": price_original,
+        "discount_rate_pct": discount_rate_pct,
+        "value_price_usd": value_price_usd if has_value_price else float("nan"),
+        "has_value_price": bool(has_value_price),
+        "product_url": product_url,
+        "image_url": image_url,
     }
-    if (trendingRoot && trendingRoot.querySelectorAll("a[href*='product/detail']").length === 0) {
-      trendingRoot = null;
-    }
-  }
 
-  // --------- 랭크 뱃지(1~100) 기반으로 카드 수집 ----------
-  const CARD_SEL = "li, article, .item, .unit, .prd_info, .product, .prod, .box, .list, .list_item";
-  const badgeEls = Array.from(document.querySelectorAll("body *"))
-    .filter(el => {
-      const t = (el.textContent || "").trim();
-      return /^[1-9]\d?$|^100$/.test(t) && t.length <= 3 && isVisible(el);
-    })
-    .sort((a,b)=>absTop(a)-absTop(b));
 
-  // 배지 → 카드, 랭크
-  const rankCards = [];
-  const seenCards = new Set();
-  for (const b of badgeEls) {
-    const rank = parseInt((b.textContent || "").trim(), 10);
-    if (!(rank >=1 && rank <= 100)) continue;
-
-    const card = b.closest(CARD_SEL);
-    if (!card || !isVisible(card)) continue;
-    // 상품 링크가 없으면 스킵
-    const a = card.querySelector("a[href*='product/detail']");
-    if (!a) continue;
-
-    // 트렌딩 섹션 내부는 제외
-    if (trendingRoot && trendingRoot.contains(card)) continue;
-
-    if (!seenCards.has(card)) {
-      rankCards.push({ rank, card, a });
-      seenCards.add(card);
-    }
-  }
-
-  // 랭크 중복 제거(동일 랭크가 여러 카드로 잡혔을 때 가장 위쪽 하나만 유지)
-  const byRank = new Map();
-  for (const rc of rankCards) {
-    if (!byRank.has(rc.rank)) byRank.set(rc.rank, rc);
-  }
-
-  // 랭크 1..100 정렬
-  const ordered = Array.from(byRank.values()).sort((x,y)=>x.rank - y.rank);
-
-  // 카드 → 데이터 파싱
-  const rows = [];
-  const added = new Set();
-
-  for (const {rank, card, a} of ordered) {
-    const href = a.getAttribute("href") || "";
-    if (!href) continue;
-    const abs = href.startsWith("http") ? href : (location.origin + href);
-    if (added.has(abs)) continue;
-
-    // 브랜드
-    let brand = "";
-    const brandEl = card.querySelector('[class*="brand" i], strong.brand');
-    if (brandEl) brand = (brandEl.textContent || "").trim();
-
-    // 상품명
-    let name = a.getAttribute("title") || a.getAttribute("aria-label") || "";
-    if (!name || name.length < 3) {
-      const nameEl = card.querySelector("p.name, .name, .prd_name, .product-name, strong.name");
-      if (nameEl) name = (nameEl.textContent || "");
-    }
-    if (!name || name.length < 3) {
-      const altEl = card.querySelector("img[alt]");
-      if (altEl) name = altEl.getAttribute("alt") || "";
-    }
-    if (!name || name.length < 3) name = a.textContent || "";
-    name = (name || "").replace(/\s+/g, " ").trim();
-    if (!name) name = "상품";
-
-    // 이미지
-    let img = "";
-    const imgEl = card.querySelector("img");
-    if (imgEl) img = imgEl.src || imgEl.getAttribute("src") || "";
-
-    // 가격 텍스트
-    let priceText = Array.from(card.querySelectorAll(
-      '[class*="price" i], [id*="price" i], [aria-label*="$" i], [aria-label*="US$" i]'
-    )).map(el => (el.innerText || "").replace(/\s+/g," ")).join(" ").trim();
-    if (!priceText) priceText = (card.innerText || "").replace(/\s+/g," ");
-
-    const amounts = [];
-    // US$ 우선
-    for (const m of priceText.matchAll(/US\$ ?([\d,]+(?:\.\d{2})?)/gi)) {
-      const v = asNum(m[0]); if (v != null) amounts.push(v);
-    }
-    // 보조: US$가 전혀 없을 때만 소수 둘째자리 허용
-    if (amounts.length === 0) {
-      for (const m of priceText.matchAll(/\b([\d,]+\.\d{2})\b/g)) {
-        const v = asNum(m[0]); if (v != null) amounts.push(v);
-      }
-    }
-
-    // Value: US$xx.xx → 정가
-    let valuePrice = null;
-    const vm = priceText.match(/(?<![A-Za-z0-9_])value(?!\s*=)\s*[:：]?\s*US\$ ?([\d,]+(?:\.\d{2})?)/i);
-    if (vm) valuePrice = asNum(vm[0]);
-
-    const clean = amounts.filter(inRange);
-    if (clean.length === 0) continue;
-
-    const priceCur = Math.min(...clean);
-    const priceOri = (valuePrice && inRange(valuePrice))
-      ? valuePrice
-      : (clean.length >= 2 ? Math.max(...clean) : priceCur);
-
-    rows.push({
-      rank,
-      brand: brand || null,
-      product_name: name || "상품",
-      price_current_usd: priceCur,
-      price_original_usd: priceOri,
-      value_price_usd: valuePrice || null,
-      product_url: abs,
-      image_url: img || null,
-    });
-    added.add(abs);
-  }
-
-  const items = rows
-    .sort((a,b)=>a.rank - b.rank)
-    .slice(0, 100);
-
-  return {
-    debug: {
-      trending_found: !!trendingRoot,
-      badges_total: badgeEls.length,
-      rank_candidates: rankCards.length,
-      distinct_ranks: byRank.size,
-      items_out: items.length
-    },
-    candidateCount: rows.length,
-    picked: items.length,
-    items
-  };
-}
-"""
-
+# ---------- public API ----------
 async def scrape_oliveyoung_global() -> List[Dict]:
+    """Top Orders 1~100위 수집 -> Dict 리스트 반환"""
+    items: List[Dict] = []
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
-        context = await browser.new_context(
-            user_agent=("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                        "AppleWebKit/537.36 (KHTML, like Gecko) "
-                        "Chrome/120 Safari/537.36"),
-            locale="en-US",
-        )
-        page = await context.new_page()
-        await page.goto(BEST_URL, wait_until="domcontentloaded", timeout=90000)
-        await page.wait_for_load_state("networkidle")
+        ctx = await browser.new_context(locale="en-US")
+        page = await ctx.new_page()
+        await page.goto(BASE_URL, wait_until="domcontentloaded")
 
-        # 더 아래까지 충분히 로드 (Top 100 끝까지)
-        prev = -1
-        same = 0
-        for i in range(60):
-            await page.mouse.wheel(0, 3200)
-            await asyncio.sleep(0.6)
-            cnt = await page.locator("a[href*='product/detail']").count()
-            if cnt == prev: same += 1
-            else: same = 0
-            prev = cnt
-            if i >= 18 and same >= 3:
-                break
+        await _ensure_top_orders_only(page)
+        cards = await _extract_cards_in_top_orders(page)
 
-        res = await page.evaluate(JS_EXTRACT)
-        await context.close()
+        # 앞에서부터 100개만
+        cards = cards[:MAX_RANK]
 
-    dbg = res.get("debug", {}) or {}
-    print(f"🔎 트렌딩 찾음={dbg.get('trending_found')}, 뱃지={dbg.get('badges_total')}, 후보={dbg.get('rank_candidates')}, 고유랭크={dbg.get('distinct_ranks')}, 최종={dbg.get('items_out')}")
+        rank = 1
+        for c in cards:
+            try:
+                item = await _card_to_item(c, rank)
+                items.append(item)
+                rank += 1
+            except Exception:
+                # 카드 단위 에러는 스킵
+                continue
 
-    items: List[Dict] = res.get("items", [])
-    for r in items:
-        r["date_kst"] = kst_today_str()
-        cur, ori = r["price_current_usd"], r["price_original_usd"]
-        r["discount_rate_pct"] = round((1 - cur / ori) * 100, 2) if ori and ori > 0 else 0.0
-        r["has_value_price"] = bool(r.get("value_price_usd"))
+        await ctx.close()
+        await browser.close()
+
     return items
+
+
+def save_items_to_csv(items: List[Dict]) -> str:
+    """items -> DataFrame -> brand 정규화 -> CSV 저장, 경로 반환"""
+    os.makedirs(DATA_DIR, exist_ok=True)
+    df = pd.DataFrame(items)
+
+    # brand 컬럼 정규화 (브랜드명만 남김)
+    if "brand" in df.columns and "product_name" in df.columns:
+        df["brand"] = df.apply(
+            lambda r: _clean_brand_value(r.get("brand", ""), r.get("product_name", "")),
+            axis=1,
+        )
+
+    # 열 순서 정리(샘플과 동일)
+    cols = [
+        "date_kst", "rank", "brand", "product_name",
+        "price_current_usd", "price_original_usd", "discount_rate_pct",
+        "value_price_usd", "has_value_price",
+        "product_url", "image_url",
+    ]
+    df = df.reindex(columns=cols)
+
+    out_path = os.path.join(DATA_DIR, f"oliveyoung_global_{kst_today_str()}.csv")
+    df.to_csv(out_path, index=False, encoding="utf-8")
+    return out_path
+
+
+# 로컬 테스트용
+if __name__ == "__main__":
+    async def _run():
+        items = await scrape_oliveyoung_global()
+        path = save_items_to_csv(items)
+        print(f"Saved: {path}, rows={len(items)}")
+    asyncio.run(_run())
