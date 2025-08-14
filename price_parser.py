@@ -1,13 +1,18 @@
-# price_parser.py
+# -*- coding: utf-8 -*-
+from __future__ import annotations
 import re
-from typing import Optional
+from typing import Tuple
 
-_PRICE_RE = re.compile(r"([\d]+(?:[.,]\d{1,2})?)")
+PRICE_RE = re.compile(r"US\$\s*([\d]+(?:\.\d{1,2})?)")
 
-def parse_price(text: Optional[str]) -> Optional[float]:
-    """'US$25.99' 같은 문자열에서 숫자만 안전하게 float로 파싱."""
-    if not text:
-        return None
-    text = text.replace(",", "")
-    m = _PRICE_RE.search(text)
-    return float(m.group(1)) if m else None
+def parse_price(text: str) -> float:
+    m = PRICE_RE.search(text or "")
+    return float(m.group(1)) if m else 0.0
+
+def pct_round(cur: float, orig: float) -> int:
+    if orig <= 0:
+        return 0
+    from math import isfinite
+    if not (isfinite(cur) and isfinite(orig)):
+        return 0
+    return int(round(max(0.0, 100.0 * (1.0 - cur / orig))))
