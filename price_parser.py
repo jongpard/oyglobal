@@ -1,12 +1,13 @@
+# price_parser.py
 import re
 from typing import Optional
-_MONEY_RE = re.compile(r"(?:USD|\$)\s*([0-9]{1,3}(?:[,][0-9]{3})*(?:\.[0-9]{1,2})?|[0-9]+(?:\.[0-9]{1,2})?)")
-def parse_price(text: str) -> Optional[float]:
-    if not text: return None
-    m = _MONEY_RE.search(text.replace("\u00A0", " "))
-    if not m:
-        try: return float(text.strip().replace(",", ""))
-        except Exception: return None
-    val = m.group(1).replace(",", "")
-    try: return float(val)
-    except Exception: return None
+
+_PRICE_RE = re.compile(r"([\d]+(?:[.,]\d{1,2})?)")
+
+def parse_price(text: Optional[str]) -> Optional[float]:
+    """'US$25.99' 같은 문자열에서 숫자만 안전하게 float로 파싱."""
+    if not text:
+        return None
+    text = text.replace(",", "")
+    m = _PRICE_RE.search(text)
+    return float(m.group(1)) if m else None
