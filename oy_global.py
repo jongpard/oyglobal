@@ -27,11 +27,11 @@ async def _try_close_overlays(page):
         "button:has-text('Accept')",
         "button:has-text('OK')",
         "button:has-text('Close')",
-        ".cookie .close", ".popup .close", ".modal .btn-close"
+        ".cookie .close", ".popup .close", ".modal .btn-close",
     ]:
         try:
             if await page.is_visible(sel):
-                await page.click(sel, timeout=500)
+                await page.click(sel, timeout=600)
                 await asyncio.sleep(0.2)
         except:
             pass
@@ -43,8 +43,25 @@ async def _wait_attached(page, selector, timeout=20000) -> bool:
     except:
         return False
 
+async def _scroll_until_stable(page, min_iters=12, max_iters=30, step=3000, pause=0.7):
+    """스크롤하면서 제품 링크 수가 더 이상 늘지 않을 때까지 반복."""
+    prev = -1
+    stable = 0
+    for i in range(max_iters):
+        await page.mouse.wheel(0, step)
+        await asyncio.sleep(pause)
+        links = await page.query_selector_all("a[href*='product/detail']")
+        cnt = len(links)
+        if cnt == prev:
+            stable += 1
+        else:
+            stable = 0
+        prev = cnt
+        if i >= min_iters and stable >= 3:
+            break
+
 async def _find_trending_bounds(page) -> Tuple[float, float]:
-    # 'What's trending in Korea?' 구간 대략적 y-범위
+    """'What's trending in Korea?' 영역의 y범위를 대략 추정."""
     heads = []
     for txt in ["What's trending in Korea?", "What’s trending in Korea?"]:
         try:
@@ -57,37 +74,36 @@ async def _find_trending_bounds(page) -> Tuple[float, float]:
     if not heads:
         return float("inf"), float("-inf")
     top_y = min(heads)
-    bottom_y = top_y + 1200.0  # 넉넉히
+    # 스크린샷 기준 충분히 넓게(트렌딩 카드 2줄+여백)
+    bottom_y = top_y + 1800.0
     return top_y, bottom_y
 
-def _clean_text(s: str) -> str:
+def _clean(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "").strip())
 
 async def _extract_name(a, card) -> str:
-    # 1) 전용 셀렉터들
+    # 1) 전용 셀렉터
     for sel in ["p.name", ".name", ".prd_name", ".product-name", "strong.name"]:
         el = await card.query_selector(sel)
         if el:
-            t = _clean_text(await el.inner_text())
+            t = _clean(await el.inner_text())
             if t:
                 return t
-    # 2) 앵커 자체 텍스트
-    t = _clean_text(await a.inner_text())
-    if t:
-        # 카드 숫자/버튼 텍스트 섞임 방지: 너무 짧으면 다음 단계
-        if len(t) >= 3:
-            return t
+    # 2) 앵커 텍스트
+    t = _clean(await a.inner_text())
+    if len(t) >= 3:
+        return t
     # 3) 이미지 alt
     img = await card.query_selector("img[alt]")
     if img:
-        alt = _clean_text(await img.get_attribute("alt"))
+        alt = _clean(await img.get_attribute("alt"))
         if alt:
             return alt
     # 4) title/aria-label
     for attr in ["title", "aria-label"]:
         val = await card.get_attribute(attr)
         if val:
-            val = _clean_text(val)
+            val = _clean(val)
             if val:
                 return val
     return "상품"
@@ -103,7 +119,7 @@ async def _gather_price_text(card) -> str:
         except:
             return ""
 
-async def scrape_oliveyoung_global() -> List[Dict]]:
+async def scrape_oliveyoung_global() -> List[Dict]:
     async with async_playwright() as pw:
         context = await _new_context(pw)
         page = await context.new_page()
@@ -112,16 +128,15 @@ async def scrape_oliveyoung_global() -> List[Dict]]:
         await _try_close_overlays(page)
         await page.wait_for_load_state("networkidle")
 
-        await _wait_attached(page, "a[href*='product/detail']", timeout=20000)
+        # 제품 링크 등장 대기
+        await _wait_attached(page, "a[href*='product/detail']", timeout=25000)
 
-        # 100위까지 로드되도록 충분히 스크롤
-        for _ in range(18):
-            await page.mouse.wheel(0, 3000)
-            await asyncio.sleep(0.8)
+        # 끝까지 스크롤(안정 조건까지)
+        await _scroll_until_stable(page)
 
-        # 모든 상세 링크
+        # 모든 상세 링크 수집
         all_links = await page.query_selector_all("a[href*='product/detail']")
-        triplets: List[Tuple[float, str, object]] = []
+        triples: List[Tuple[float, str, object]] = []
         for a in all_links:
             try:
                 bb = await a.bounding_box()
@@ -131,26 +146,27 @@ async def scrape_oliveyoung_global() -> List[Dict]]:
                 if not href:
                     continue
                 url = href if href.startswith("http") else f"https://global.oliveyoung.com{href}"
-                triplets.append((bb["y"], url, a))
+                triples.append((bb["y"], url, a))
             except:
                 continue
 
-        triplets.sort(key=lambda t: t[0])
-        trending_top, trending_bottom = await _find_trending_bounds(page)
+        # y 오름차순
+        triples.sort(key=lambda t: t[0])
 
-        # 트렌딩 범위 제외(위+아래 포함)
+        # 트렌딩 제외(위+아래 포함)
+        t_top, t_bottom = await _find_trending_bounds(page)
         selected: List[Tuple[str, object]] = []
         seen = set()
-        for y, url, a in triplets:
-            if trending_top <= y <= trending_bottom:
+        for y, url, a in triples:
+            if t_top <= y <= t_bottom:
                 continue
             if url in seen:
                 continue
             seen.add(url)
             selected.append((url, a))
 
-        print(f"🔎 링크 전체: {len(triplets)}개, 선택(트렌딩 제외): {len(selected)}개, "
-              f"트렌딩 y=({trending_top:.1f}~{trending_bottom:.1f})")
+        print(f"🔎 링크 전체: {len(triples)}개, 선택(트렌딩 제외): {len(selected)}개, "
+              f"트렌딩 y=({t_top:.1f}~{t_bottom:.1f})")
 
         items: List[Dict] = []
         rank = 0
@@ -159,6 +175,8 @@ async def scrape_oliveyoung_global() -> List[Dict]]:
         for url, a in selected:
             try:
                 card = await a.evaluate_handle("el => el.closest('li,div,article') || el")
+
+                # 이미지
                 img_el = await card.query_selector("img")
                 img_url = (await img_el.get_attribute("src")) if img_el else None
 
@@ -167,12 +185,12 @@ async def scrape_oliveyoung_global() -> List[Dict]]:
                 for sel in ["strong.brand", ".brand", ".prd_brand", ".product-brand"]:
                     el = await card.query_selector(sel)
                     if el:
-                        t = _clean_text(await el.inner_text())
+                        t = _clean(await el.inner_text())
                         if t:
                             brand = t
                             break
 
-                product_name = await _extract_name(a, card)
+                name = await _extract_name(a, card)
 
                 price_blob = await _gather_price_text(card)
                 price_info = parse_prices_and_discount(price_blob)
@@ -185,14 +203,14 @@ async def scrape_oliveyoung_global() -> List[Dict]]:
                     "date_kst": kst_today_str(),
                     "rank": rank,
                     "brand": brand,
-                    "product_name": product_name,
+                    "product_name": name,
                     "price_current_usd": price_info["price_current_usd"],
                     "price_original_usd": price_info["price_original_usd"],
                     "discount_rate_pct": price_info["discount_rate_pct"],
                     "value_price_usd": price_info["value_price_usd"],
                     "has_value_price": price_info["has_value_price"],
                     "product_url": url,
-                    "image_url": img_url
+                    "image_url": img_url,
                 })
             except Exception:
                 continue
