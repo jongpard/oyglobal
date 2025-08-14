@@ -1,51 +1,67 @@
-# slack_notify.py (메시지 생성 전용)
-import math
+import os
+import csv
+import json
+from datetime import datetime, timezone, timedelta
+import urllib.request
 
-def _fmt_money(x):
+KST = timezone(timedelta(hours=9))
+
+def fmt_price(v):
     try:
-        return f"US${float(x):.2f}"
-    except Exception:
-        return "US$0.00"
+        n = float(v)
+        return f"US${n:,.2f}"
+    except:
+        return "-"
 
-def build_top10_message(items, date_kst):
-    """
-    items: scrape 결과(dict) 리스트
-    date_kst: 'YYYY-MM-DD'
-    - 제품명이 이미 브랜드로 시작하면 브랜드를 중복 표기하지 않음
-    - 슬랙 링크 형식: <url|text>
-    """
-    header = f"*올리브영 글로벌 전체 랭킹* ({date_kst} KST)\n\n*TOP 10*"
-    lines = []
+def build_message(csv_path: str) -> str:
+    rows = []
+    with open(csv_path, newline="", encoding="utf-8") as f:
+        r = csv.DictReader(f)
+        for row in r:
+            rows.append(row)
 
-    for idx, it in enumerate(items[:10], start=1):
-        brand = (it.get("brand") or "").strip()
-        name  = (it.get("product_name") or "").strip()
-        cur   = it.get("price_current_usd")
-        orig  = it.get("price_original_usd")
-        pct   = it.get("discount_rate_pct")
-        url   = it.get("product_url") or ""
+    rows = sorted(rows, key=lambda x: int(x["rank"]))[:10]
 
-        # 표시명: 제품명이 이미 브랜드로 시작하면 브랜드를 붙이지 않음
-        if brand and name.lower().startswith(brand.lower()):
-            display = name
-        else:
-            display = (brand + " " + name).strip() if (brand or name) else "(No name)"
+    date_str = datetime.now(KST).strftime("%Y-%m-%d %H:%M (KST)")
+    lines = [f"*올리브영 글로벌 전체 랭킹* ({date_str})", "", "*TOP 10*"]
+    for r in rows:
+        rank = r["rank"]
+        name = r["product_name"].strip()  # ✅ 상품명만 사용
+        url = r["product_url"]
+        cur = fmt_price(r["price_current_usd"])
+        org = fmt_price(r["price_original_usd"])
+        try:
+            disc = float(r.get("discount_rate_pct") or 0.0)
+        except:
+            disc = 0.0
+        disc_str = f"(↓{disc:.2f}%)" if disc > 0 else ""
 
-        price_part = f" – {_fmt_money(cur)}"
-        extra = []
-
-        if orig and not (isinstance(orig, float) and math.isnan(orig)):
-            extra.append(f"(정가 {_fmt_money(orig)})")
-        if pct and not (isinstance(pct, float) and math.isnan(pct)):
-            arrow = "↓" if pct > 0 else "→"
-            extra.append(f"({arrow}{abs(float(pct)):.2f}%)")
-
-        tail = " " + " ".join(extra) if extra else ""
-        if url:
-            line = f"{idx}. <{url}|{display}>{price_part}{tail}"
-        else:
-            line = f"{idx}. {display}{price_part}{tail}"
-
+        # 하이퍼링크는 상품명만
+        line = f"{rank}. <{url}|{name}> – {cur} (정가 {org}) {disc_str}".rstrip()
         lines.append(line)
 
-    return header + "\n" + "\n".join(lines)
+    lines.append("")
+    lines.append("_(첫 실행이어서 비교 기준이 없습니다.)_")
+    return "\n".join(lines)
+
+def send_to_slack(text: str, webhook_url: str):
+    data = json.dumps({"text": text}).encode("utf-8")
+    req = urllib.request.Request(
+        webhook_url,
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req) as resp:
+        resp.read()
+
+if __name__ == "__main__":
+    csv_path = os.environ.get("CSV_PATH", "")
+    webhook = os.environ.get("SLACK_WEBHOOK_URL", "")
+    if not csv_path or not webhook:
+        print("CSV_PATH / SLACK_WEBHOOK_URL 둘 다 필요합니다.")
+        raise SystemExit(1)
+
+    msg = build_message(csv_path)
+    send_to_slack(msg, webhook)
+    print("✅ Sent Slack message.")
