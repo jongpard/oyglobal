@@ -10,7 +10,7 @@
   GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN   # OAuth 권장
   GDRIVE_SERVICE_ACCOUNT_JSON                                    # 선택(Shared Drive 등)
   GDRIVE_FOLDER_ID
-  DRIVE_AUTH_MODE=oauth|oauth_only|service_account               # 기본 oauth
+  DRIVE_AUTH_MODE=oauth|oauth_only|service_account               # 기본 oauth_only 권장
 """
 import os, re, io, math, json, pytz, traceback
 import datetime as dt
@@ -42,17 +42,21 @@ def parse_price_to_float(text: str) -> Optional[float]:
     try: return float(t)
     except: return None
 
-def fmt_currency_usd(v): return f"${(v or 0):,.2f}"
+def fmt_currency_usd(v) -> str:
+    try:
+        if v is None: return "$0.00"
+        if isinstance(v, float) and math.isnan(v): return "$0.00"
+        return f"${float(v):,.2f}"
+    except:
+        return "$0.00"
+
 def slack_escape(s): return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 def make_display_name(brand: str, product: str, include_brand: bool) -> str:
     """브랜드+제품명(중복 방지). include_brand=False면 제품명만."""
-    product = clean_text(product)
-    brand = clean_text(brand)
-    if not include_brand or not brand:
-        return product
-    if re.match(rf"^\[?\s*{re.escape(brand)}\b", product, flags=re.I):
-        return product
+    product = clean_text(product); brand = clean_text(brand)
+    if not include_brand or not brand: return product
+    if re.match(rf"^\[?\s*{re.escape(brand)}\b", product, flags=re.I): return product
     return f"{brand} {product}"
 
 def discount_floor(orig: Optional[float], sale: Optional[float], percent_text: Optional[str]) -> Optional[int]:
@@ -121,7 +125,6 @@ def parse_static_html(html: str) -> List[Product]:
         if pct_node: pct_txt = clean_text(pct_node.get_text())
 
         pct = discount_floor(orig, sale, pct_txt)
-
         if name and link:
             items.append(Product(rank, brand, name, sale, orig, pct, link))
     return items
@@ -180,6 +183,7 @@ def fetch_by_playwright() -> List[Product]:
                 const rank  = parseInt(rtxt) || (idx+1);
                 let sale = amt(get(el, ".price-info strong.point"));
                 let orig = amt(get(el, ".price-info span"));
+                if (sale == null && orig != null) sale = orig;   // 가격 누락 보정
                 const pctTxt = get(el, ".price-info .rate, .discount-rate, .percent, .dc");
                 return {rank, brand, name, link, sale, orig, pctTxt};
               }).filter(x => x.name && x.link);
@@ -218,7 +222,7 @@ def build_drive_service(mode: Optional[str] = None):
 
     scopes = ["https://www.googleapis.com/auth/drive"]
     if mode is None:
-        mode = os.getenv("DRIVE_AUTH_MODE", "oauth").lower()
+        mode = os.getenv("DRIVE_AUTH_MODE", "oauth_only").lower()
 
     cid  = os.getenv("GOOGLE_CLIENT_ID")
     csec = os.getenv("GOOGLE_CLIENT_SECRET")
@@ -251,11 +255,24 @@ def build_drive_service(mode: Optional[str] = None):
             creds = sa_creds
             used = "service_account"
 
-    if creds is None:
-        raise RuntimeError("Google Drive 자격정보가 없습니다.")
-
+    if creds is None: raise RuntimeError("Google Drive 자격정보가 없습니다.")
     print(f"[Drive] auth={used}")
     return build("drive", "v3", credentials=creds, cache_discovery=False), (used == "service_account")
+
+def drive_preflight(service, folder_id: str) -> bool:
+    """폴더 접근 권한/존재 확인."""
+    from googleapiclient.errors import HttpError
+    try:
+        meta = service.files().get(
+            fileId=folder_id,
+            fields="id,name,driveId",
+            supportsAllDrives=True,
+        ).execute()
+        print(f"[Drive] folder OK: name='{meta.get('name')}', driveId='{meta.get('driveId','MyDrive')}'")
+        return True
+    except HttpError as e:
+        print("[Drive] folder access error:", e)
+        return False
 
 def drive_upload_csv(service, is_sa: bool, folder_id: str, name: str, df: pd.DataFrame) -> str:
     from googleapiclient.http import MediaIoBaseUpload
@@ -264,10 +281,8 @@ def drive_upload_csv(service, is_sa: bool, folder_id: str, name: str, df: pd.Dat
     def _do_upload(svc):
         q = f"name = '{name}' and '{folder_id}' in parents and trashed = false"
         res = svc.files().list(
-            q=q,
-            fields="files(id,name,driveId)",
-            supportsAllDrives=True,
-            includeItemsFromAllDrives=True,
+            q=q, fields="files(id,name,driveId)",
+            supportsAllDrives=True, includeItemsFromAllDrives=True
         ).execute()
         file_id = res.get("files", [{}])[0].get("id") if res.get("files") else None
 
@@ -284,10 +299,11 @@ def drive_upload_csv(service, is_sa: bool, folder_id: str, name: str, df: pd.Dat
         return _do_upload(service)
     except HttpError as e:
         msg = f"{e}"
-        # SA 저장용량 403 → OAuth-only 재시도
         if is_sa and ("storageQuotaExceeded" in msg or "Service Accounts do not have storage quota" in msg):
-            print("[Drive] SA 403(storageQuotaExceeded) → OAuth로 재시도")
+            print("[Drive] SA 403(storageQuotaExceeded) → OAuth-only 재시도")
             svc2, _ = build_drive_service("oauth_only")
+            if not drive_preflight(svc2, folder_id):
+                raise
             return _do_upload(svc2)
         raise
 
@@ -296,8 +312,7 @@ def drive_download_csv(service, folder_id: str, name: str) -> Optional[pd.DataFr
     res = service.files().list(
         q=f"name = '{name}' and '{folder_id}' in parents and trashed = false",
         fields="files(id,name)",
-        supportsAllDrives=True,
-        includeItemsFromAllDrives=True
+        supportsAllDrives=True, includeItemsFromAllDrives=True
     ).execute()
     files = res.get("files", [])
     if not files: return None
@@ -342,14 +357,8 @@ def line_move(name_link: str, prev_rank: Optional[int], curr_rank: Optional[int]
 def build_sections(df_today: pd.DataFrame, df_prev: Optional[pd.DataFrame]) -> Dict[str, List[str]]:
     S = {"top10": [], "rising": [], "newcomers": [], "falling": [], "outs": [], "inout_count": 0}
 
-    df_t = df_today.copy(); df_t["key"] = df_t["url"]; df_t.set_index("key", inplace=True)
-    if df_prev is not None and len(df_prev):
-        df_p = df_prev.copy(); df_p["key"] = df_p["url"]; df_p.set_index("key", inplace=True)
-    else:
-        df_p = pd.DataFrame(columns=df_t.columns)
-
-    # ✅ TOP 10: 브랜드 포함
-    top10 = df_t.dropna(subset=["rank"]).sort_values("rank").head(10)
+    # TOP10 (브랜드 포함)
+    top10 = df_today.dropna(subset=["rank"]).sort_values("rank").head(10)
     for _, r in top10.iterrows():
         disp = make_display_name(r.get("brand",""), r["product_name"], include_brand=True)
         name_link = f"<{r['url']}|{slack_escape(disp)}>"
@@ -357,7 +366,14 @@ def build_sections(df_today: pd.DataFrame, df_prev: Optional[pd.DataFrame]) -> D
         dc = r.get("discount_percent"); tail = f" (↓{int(dc)}%)" if pd.notnull(dc) else ""
         S["top10"].append(f"{int(r['rank'])}. {name_link} — {price_txt}{tail}")
 
-    # Top30 비교 준비
+    # 전일 CSV 없으면 비교 섹션 스킵
+    if df_prev is None or not len(df_prev):
+        return S  # rising/newcomers/falling/outs/inout_count=0
+
+    # --- 이하 전일 CSV가 있을 때만 ---
+    df_t = df_today.copy(); df_t["key"] = df_t["url"]; df_t.set_index("key", inplace=True)
+    df_p = df_prev.copy(); df_p["key"] = df_p["url"]; df_p.set_index("key", inplace=True)
+
     t30 = df_t[(df_t["rank"].notna()) & (df_t["rank"] <= 30)].copy()
     p30 = df_p[(df_p["rank"].notna()) & (df_p["rank"] <= 30)].copy()
     common = set(t30.index) & set(p30.index)
@@ -412,8 +428,8 @@ def build_slack_message(date_str: str, S: Dict[str, List[str]]) -> str:
              "*TOP 10*"] + (S["top10"] or ["- 데이터 없음"]) + ["",
              "*🔥 급상승*"] + (S["rising"] or ["- 해당 없음"]) + ["",
              "*🆕 뉴랭커*"] + (S["newcomers"] or ["- 해당 없음"]) + ["",
-             "*📉 급하락*"] + (S["falling"] or ["- 해당 없음"])
-    # 급하락 섹션 안에 OUT도 같이 표기
+             "*📉 급하락*"] + (S["falling"] or ["- 해당 없음"])]
+    # 급하락 섹션에 OUT도 함께 표기
     parts += S.get("outs", [])
     parts += ["", "*🔄 랭크 인&아웃*", f"{S.get('inout_count', 0)}개의 제품이 인&아웃 되었습니다."]
     return "\n".join(parts)
@@ -448,8 +464,19 @@ def main():
     folder = os.getenv("GDRIVE_FOLDER_ID", "").strip()
     if folder:
         try:
-            prefer = os.getenv("DRIVE_AUTH_MODE","oauth").lower()
+            prefer = os.getenv("DRIVE_AUTH_MODE","oauth_only").lower()
             svc, is_sa = build_drive_service(prefer)
+
+            # 폴더 접근 프리체크
+            if not drive_preflight(svc, folder):
+                if is_sa:
+                    print("[Drive] SA → OAuth-only 재시도")
+                    svc, is_sa = build_drive_service("oauth_only")
+                    if not drive_preflight(svc, folder):
+                        raise RuntimeError("Google Drive 폴더 접근 불가: FOLDER_ID/권한 확인 필요")
+                else:
+                    raise RuntimeError("Google Drive 폴더 접근 불가: FOLDER_ID/권한 확인 필요")
+
             drive_upload_csv(svc, is_sa, folder, file_today, df_today)
             print("Google Drive 업로드 완료:", file_today)
             df_prev = drive_download_csv(svc, folder, file_yesterday)
