@@ -4,16 +4,17 @@
 - 소스: https://global.oliveyoung.com/display/page/best-seller?target=pillsTab1Nav1
 - HTTP(정적) → 부족 시 Playwright(동적) 폴백
 - 파일명: 올리브영글로벌_랭킹_YYYY-MM-DD.csv (KST)
-- 전일 CSV 비교 Top30 → Slack 알림 (전일 없으면 비교 섹션 생략)
+- 전일 CSV 비교 Top30 → Slack 알림
 
 필요 환경변수:
   SLACK_WEBHOOK_URL
   GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN
   GDRIVE_FOLDER_ID
   GDRIVE_SERVICE_ACCOUNT_JSON (선택)
-  DRIVE_AUTH_MODE=oauth_only (권장)
+  DRIVE_AUTH_MODE = oauth_only | oauth | service_account   (기본 oauth_only 권장)
 """
-import os, re, io, math, json, pytz, traceback, datetime as dt
+import os, re, io, math, json, pytz, traceback
+import datetime as dt
 from dataclasses import dataclass
 from typing import List, Dict, Optional, Tuple
 
@@ -33,16 +34,21 @@ def clean_text(s): return re.sub(r"\s+", " ", (s or "")).strip()
 def to_float(s):
     if not s: return None
     m = re.findall(r"[\d]+(?:\.[\d]+)?", str(s)); return float(m[0]) if m else None
+
+# ---------- 가격/표기 유틸 ----------
+PRICE_RE = re.compile(r"(?:US\$|\$)\s*([\d.,]+)")
 def parse_price_to_float(text: str) -> Optional[float]:
     if not text: return None
     t = text.replace("US$", "").replace("$", "").replace(",", "").strip()
     try: return float(t)
     except: return None
+
 def fmt_currency_usd(v) -> str:
     try:
         if v is None or (isinstance(v, float) and math.isnan(v)): return "$0.00"
         return f"${float(v):,.2f}"
     except: return "$0.00"
+
 def slack_escape(s): return s.replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
 
 def make_display_name(brand: str, product: str, include_brand: bool) -> str:
@@ -64,60 +70,61 @@ def discount_floor(orig: Optional[float], sale: Optional[float], percent_text: O
 class Product:
     rank: Optional[int]
     brand: str
-    title: str
-    price: Optional[float]
-    orig_price: Optional[float]
+    title: str   # 제품명 (사이트 표기)
+    price: Optional[float]       # 판매가
+    orig_price: Optional[float]  # 정가(없으면 판매가와 동일)
     discount_percent: Optional[int]
     url: str
 
-# ---------- 정적 파싱 (있으면 사용, 없으면 0개) ----------
+# ---------- 정적 파싱 ----------
 def parse_static_html(html: str) -> List[Product]:
     soup = BeautifulSoup(html, "lxml")
     container = soup.select_one("#pillsTab1Nav1, [id*='pillsTab1Nav1']")
     root = container or soup
-    cards = root.select("li.order-best-product, li[data-ga-label='best']")
+    cards = root.select("ul#orderBestProduct li.order-best-product.prdt-unit")
     items: List[Product] = []
     for idx, li in enumerate(cards, start=1):
         name = ""
-        inp = li.select_one("input[name='prdtName']")
-        if inp and inp.has_attr("value"): name = clean_text(inp["value"])
-        if not name:
-            nm = li.select_one(".product_name, .name, .tit, .item_name, .prd_name")
-            if nm: name = clean_text(nm.get_text(" ", strip=True))
+        nm = li.select_one("dl.brand-info dd, .brand-info dd, .product_name, .name, .tit, .prd_name")
+        if nm: name = clean_text(nm.get_text(" ", strip=True))
 
         brand = ""
         b = li.select_one("dl.brand-info dt, .brand, .brand_name, .brandName")
         if b: brand = clean_text(b.get_text(" ", strip=True))
 
-        link = ""
         a = li.select_one("a[href]")
-        if a and a.has_attr("href"): link = a["href"]
+        link = a["href"] if (a and a.has_attr("href")) else ""
         if link.startswith("/"): link = "https://global.oliveyoung.com" + link
 
+        rtxt = li.select_one(".rank-badge span, .rank-badge")
         rank = None
-        span = li.select_one(".rank-badge span, .rank_num")
-        if span:
-            rnum = to_float(clean_text(span.get_text()))
-            if rnum is not None: rank = int(rnum)
+        if rtxt:
+            n = to_float(clean_text(rtxt.get_text()))
+            if n is not None: rank = int(n)
         if rank is None: rank = idx
 
+        # 가격: .price-info 전체에서 모든 달러 금액 추출 → sale=min, orig=max
         pbox = li.select_one(".price-info") or li
         ptxt = clean_text(pbox.get_text(" ", strip=True))
-        nums = [parse_price_to_float(m) for m in re.findall(r"(?:US\$|\$)\s*([\d.,]+)", ptxt)]
+        nums = [parse_price_to_float(x) for x in PRICE_RE.findall(ptxt)]
         nums = [x for x in nums if x is not None]
         sale = orig = None
         if len(nums) == 1: sale = nums[0]
         elif len(nums) >= 2: sale, orig = min(nums), max(nums)
 
-        sale_txt = li.select_one(".price-info strong.point, .price-info strong, .price-info .sale_price, .price-info .price")
-        orig_txt = li.select_one(".price-info .original_price, .price-info del, .price-info span")
-        if sale is None and sale_txt: sale = parse_price_to_float(sale_txt.get_text())
-        if orig is None and orig_txt: orig = parse_price_to_float(orig_txt.get_text())
-        if sale is None and orig is not None: sale = orig
+        # 백업 셀렉터
+        if sale is None:
+            sale_el = li.select_one(".price-info .point, .price-info strong, .price-info .sale_price, .price-info .price")
+            if sale_el: sale = parse_price_to_float(sale_el.get_text())
+        if orig is None:
+            orig_el = li.select_one(".price-info span, .price-info del")
+            if orig_el: orig = parse_price_to_float(orig_el.get_text())
+        if sale is None and orig is not None:
+            sale = orig
 
         pct_txt = ""
-        pct_node = li.select_one(".price-info .rate, .discount-rate, .percent, .dc")
-        if pct_node: pct_txt = clean_text(pct_node.get_text())
+        pct_el = li.select_one(".price-info .rate, .discount-rate, .percent, .dc")
+        if pct_el: pct_txt = clean_text(pct_el.get_text())
         pct = discount_floor(orig, sale, pct_txt)
 
         if name and link:
@@ -134,16 +141,15 @@ def fetch_by_http() -> List[Product]:
     r.raise_for_status()
     return parse_static_html(r.text)
 
-# ---------- Playwright (강화: 지역 Global 전환 + 폴링 대기) ----------
+# ---------- Playwright(강화): Global 전환 + 폴링 대기 ----------
 def fetch_by_playwright() -> List[Product]:
-    """동적 렌더링 강제 대기 + 지역 드롭다운을 Global로 전환 + 견고한 셀렉터."""
     from playwright.sync_api import sync_playwright
     import time, pathlib
 
     CARD_SELS = [
-        "#pillsTab1Nav1 li.order-best-product",
-        "#pillsTab1Nav1 li[data-ga-label='best']",
-        "#pillsTab1Nav1 li",
+        "ul#orderBestProduct li.order-best-product.prdt-unit",
+        "#pillsTab1Nav1 ul#orderBestProduct li.order-best-product.prdt-unit",
+        "#pillsTab1Nav1 li.order-best-product.prdt-unit",
     ]
 
     def _debug_dump(page, tag="global"):
@@ -153,60 +159,47 @@ def fetch_by_playwright() -> List[Product]:
         page.screenshot(path=f"data/debug/page_{tag}.png", full_page=True)
 
     def _force_region_global(page):
-        # 헤더의 지역(USA/Global) 드롭다운 열기 → Global 선택
-        opened = False
-        for sel in [
+        # 헤더 우측 지역 드롭다운(select 또는 커스텀)
+        try:
+            sel = page.locator("select.cntry-select-box").first
+            if sel.count():
+                sel.select_option(label="Global")
+                page.wait_for_timeout(500)
+                return
+        except: pass
+        # 커스텀 셀렉터 케이스 (USA → Global)
+        for open_sel in [
+            ".cntry-select-box-wrapper .selected-cntry",
             "button[aria-haspopup='listbox']",
             "button:has-text('USA')",
-            "[role='button']:has-text('USA')",
-            "header :has-text('USA') >> xpath=ancestor::*[self::button or @role='button'][1]",
+            "[role='button']:has-text('USA')"
         ]:
             try:
-                page.locator(sel).first.click(timeout=1200)
-                opened = True
-                break
-            except:
-                pass
-        if opened:
-            for opt in [
-                "[role='option']:has-text('Global')",
-                "li:has-text('Global')",
-                "text=Global",
-            ]:
-                try:
-                    page.locator(opt).first.click(timeout=1200)
-                    break
-                except:
-                    pass
-        # 페이지 내부 탭도 강제로 Global 영역 선택
-        for sel in [
-            "[href*='pillsTab1Nav1']",
-            "#pillsTab1Nav1-tab",
-            "[data-bs-target='#pillsTab1Nav1']",
-            "button:has-text('Top Orders')",
-        ]:
+                page.locator(open_sel).first.click(timeout=1200)
+                for opt in ["li[role='option']:has-text('Global')", "li:has-text('Global')", "text=Global"]:
+                    try:
+                        page.locator(opt).first.click(timeout=1200)
+                        return
+                    except: pass
+            except: pass
+        # 내부 탭도 Global(Top Orders)로 클릭
+        for tab_sel in ["[href*='pillsTab1Nav1']", "#pillsTab1Nav1-tab", "[data-bs-target='#pillsTab1Nav1']",
+                        "button:has-text('Top Orders')"]:
             try:
-                page.locator(sel).first.click(timeout=1500)
-                break
-            except:
-                pass
+                page.locator(tab_sel).first.click(timeout=1200)
+                return
+            except: pass
 
     with sync_playwright() as p:
         browser = p.chromium.launch(
             headless=True,
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--no-sandbox",
-                "--disable-dev-shm-usage",
-            ],
+            args=["--disable-blink-features=AutomationControlled","--no-sandbox","--disable-dev-shm-usage"],
         )
         context = browser.new_context(
             viewport={"width":1366,"height":900},
             locale="en-US",
             timezone_id="Asia/Seoul",
-            user_agent=("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                        "AppleWebKit/537.36 (KHTML, like Gecko) "
-                        "Chrome/123.0.0.0 Safari/537.36"),
+            user_agent=("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36"),
             extra_http_headers={"Accept-Language":"en-US,en;q=0.9"},
         )
         context.add_init_script("Object.defineProperty(navigator,'webdriver',{get:()=>undefined});")
@@ -216,15 +209,14 @@ def fetch_by_playwright() -> List[Product]:
         try: page.wait_for_load_state("networkidle", timeout=30_000)
         except: pass
 
-        # 배너 닫기
+        # 쿠키/배너 닫기
         for sel in ["#onetrust-accept-btn-handler","button:has-text('Accept')","button:has-text('확인')","[aria-label='Close']"]:
             try: page.locator(sel).first.click(timeout=1200)
             except: pass
 
-        # ✅ 지역을 Global로 전환
         _force_region_global(page)
 
-        # 컨텐츠 렌더링 폴링 (최대 35s)
+        # 스크롤 + 폴링 (최대 35s)
         start = time.time(); found = 0
         while time.time() - start < 35:
             try: page.mouse.wheel(0, 1400)
@@ -241,35 +233,35 @@ def fetch_by_playwright() -> List[Product]:
             context.close(); browser.close()
             return []
 
-        # 데이터 추출
+        # JS로 필요한 필드만 추출
         data = page.evaluate("""
             (sels) => {
-              const root = document.querySelector("#pillsTab1Nav1, [id*='pillsTab1Nav1']") || document;
-              const pick = (el,s) => (el.querySelector(s)?.textContent || '').replace(/\\s+/g,' ').trim();
-              const toAmt = t => { if(!t) return null; const v=parseFloat(t.replace(/US\\$|\\$|,/g,'').trim()); return isNaN(v)?null:v; };
+              const get = (el, s) => (el.querySelector(s)?.textContent || '').replace(/\\s+/g,' ').trim();
+              const numsFrom = (t) => Array.from((t||'').matchAll(/(?:US\\$|\\$)\\s*([\\d.,]+)/g))
+                                           .map(m => parseFloat(m[1].replace(/,/g,'')))
+                                           .filter(v=>!isNaN(v));
               let nodes = [];
-              for (const s of sels) { nodes = Array.from(root.querySelectorAll(s)); if (nodes.length >= 10) break; }
+              for (const s of sels) { nodes = Array.from(document.querySelectorAll(s)); if (nodes.length >= 10) break; }
               return nodes.map((el, i) => {
-                const name  = (el.querySelector("input[name='prdtName']")?.value || pick(el, ".product_name, .name, .tit, .item_name, .prd_name"));
-                const brand = pick(el, "dl.brand-info dt, .brand, .brand_name, .brandName");
-                const link  = el.querySelector("a")?.href || '';
-                const rtxt  = pick(el, ".rank-badge span, .rank_num");
-                const rank  = parseInt(rtxt) || (i+1);
+                const brand = get(el, "dl.brand-info dt, .brand, .brand_name, .brandName");
+                const name  = get(el, "dl.brand-info dd, .prd_name, .name, .product_name");
+                const a     = el.querySelector("a[href]");
+                const link  = a ? a.href : '';
+                const rtxt  = get(el, ".rank-badge span, .rank-badge");
+                const rank  = parseInt((rtxt||'').replace(/[^0-9]/g,'')) || (i+1);
 
                 const pbox  = el.querySelector(".price-info") || el;
                 const ptxt  = (pbox.textContent || '').replace(/\\s+/g,' ').trim();
-                const nums  = Array.from(ptxt.matchAll(/(?:US\\$|\\$)\\s*([\\d.,]+)/g))
-                                   .map(m => parseFloat(m[1].replace(/,/g,'')))
-                                   .filter(v => !isNaN(v));
+                const arr   = numsFrom(ptxt);
                 let sale=null, orig=null;
-                if (nums.length===1){ sale=nums[0]; }
-                else if (nums.length>=2){ sale=Math.min(...nums); orig=Math.max(...nums); }
+                if (arr.length===1){ sale=arr[0]; }
+                else if (arr.length>=2){ sale=Math.min(...arr); orig=Math.max(...arr); }
 
-                if (sale==null) sale = toAmt(pick(el, ".price-info strong.point, .price-info strong, .price-info .sale_price, .price-info .price"));
-                if (orig==null) orig = toAmt(pick(el, ".price-info .original_price, .price-info del, .price-info span"));
+                if (sale==null) sale = parseFloat((get(el, ".price-info .point, .price-info strong, .price-info .sale_price, .price-info .price")||'').replace(/[^\\d.]/g,''))||null;
+                if (orig==null) orig = parseFloat((get(el, ".price-info span, .price-info del")||'').replace(/[^\\d.]/g,''))||null;
                 if (sale==null && orig!=null) sale = orig;
 
-                const pctTxt = pick(el, ".price-info .rate, .discount-rate, .percent, .dc");
+                const pctTxt = get(el, ".price-info .rate, .discount-rate, .percent, .dc");
                 return {rank, brand, name, link, sale, orig, pctTxt};
               }).filter(x => x.name && x.link);
             }
@@ -280,9 +272,13 @@ def fetch_by_playwright() -> List[Product]:
     items: List[Product] = []
     for r in data:
         items.append(Product(
-            rank=int(r["rank"]), brand=clean_text(r["brand"]), title=clean_text(r["name"]),
-            price=r["sale"], orig_price=r["orig"],
-            discount_percent=discount_floor(r["orig"], r["sale"], r["pctTxt"]), url=r["link"]
+            rank=int(r["rank"]),
+            brand=clean_text(r["brand"]),
+            title=clean_text(r["name"]),
+            price=r["sale"],
+            orig_price=r["orig"],
+            discount_percent=discount_floor(r["orig"], r["sale"], r["pctTxt"]),
+            url=r["link"],
         ))
     return items
 
@@ -296,9 +292,15 @@ def fetch_products() -> List[Product]:
 
 # ---------- Google Drive ----------
 def build_drive_service(mode: Optional[str] = None):
+    """
+    OAuth-only 기본. invalid_scope가 뜨는 환경을 대비해
+    - scopes=['https://www.googleapis.com/auth/drive'] 시도 후 실패하면
+    - scopes=None(기존 토큰 스코프 재사용)로 재시도.
+    """
     from googleapiclient.discovery import build
     from google.oauth2.credentials import Credentials
     from google.oauth2 import service_account as gsa
+    from google.auth.exceptions import RefreshError
 
     mode = (mode or os.getenv("DRIVE_AUTH_MODE", "oauth_only")).lower()
 
@@ -307,35 +309,47 @@ def build_drive_service(mode: Optional[str] = None):
     rtk  = os.getenv("GOOGLE_REFRESH_TOKEN")
     sa_json = os.getenv("GDRIVE_SERVICE_ACCOUNT_JSON", "").strip()
 
-    def make_oauth():
-        if not (cid and csec and rtk): return None
-        # scopes 미전달 → refresh token 스코프 그대로 사용
-        return Credentials(None, refresh_token=rtk, token_uri="https://oauth2.googleapis.com/token",
-                           client_id=cid, client_secret=csec)
+    def try_oauth(scopes):
+        creds = Credentials(
+            None,
+            refresh_token=rtk,
+            token_uri="https://oauth2.googleapis.com/token",
+            client_id=cid,
+            client_secret=csec,
+            scopes=scopes,
+        )
+        svc = build("drive", "v3", credentials=creds, cache_discovery=False)
+        # about 호출로 refresh 강제 → invalid_scope 조기 감지
+        svc.about().get(fields="user(displayName,emailAddress)").execute()
+        print(f"[Drive] auth=oauth scopes={'drive' if scopes else 'inherit'}")
+        return svc, False
 
-    def make_sa():
+    def make_service_account():
         if not sa_json: return None
         info = json.loads(sa_json)
-        return gsa.Credentials.from_service_account_info(info, scopes=["https://www.googleapis.com/auth/drive"])
+        creds = gsa.Credentials.from_service_account_info(
+            info, scopes=["https://www.googleapis.com/auth/drive"]
+        )
+        svc = build("drive", "v3", credentials=creds, cache_discovery=False)
+        print("[Drive] auth=service_account")
+        return svc, True
 
-    creds = None; used = None
     if mode in ("oauth", "oauth_only"):
-        creds = make_oauth(); used = "oauth" if creds else None
-        if not creds and mode == "oauth_only":
-            raise RuntimeError("OAuth 자격정보가 없습니다. GOOGLE_CLIENT_ID/SECRET/REFRESH_TOKEN 확인")
-    if not creds and mode in ("oauth", "service_account"):
-        creds = make_sa(); used = "service_account" if creds else None
-    if not creds: raise RuntimeError("Google Drive 자격정보가 없습니다.")
+        if not (cid and csec and rtk):
+            if mode == "oauth_only":
+                raise RuntimeError("OAuth 자격정보가 없습니다. GOOGLE_CLIENT_ID/SECRET/REFRESH_TOKEN 확인")
+        else:
+            try:
+                return try_oauth(["https://www.googleapis.com/auth/drive"])
+            except RefreshError as e:
+                print("[Drive] oauth(drive scope) 실패 → scope 없이 재시도:", e)
+                return try_oauth(None)
 
-    svc = build("drive", "v3", credentials=creds, cache_discovery=False)
-    print(f"[Drive] auth={used}")
-    try:
-        about = svc.about().get(fields="user(displayName,emailAddress)").execute()
-        u = about.get("user", {})
-        print(f"[Drive] user={u.get('displayName')} <{u.get('emailAddress')}>")
-    except Exception as e:
-        print("[Drive] whoami 실패:", e)
-    return svc, (used == "service_account")
+    if mode in ("oauth", "service_account"):
+        svc_sa = make_service_account()
+        if svc_sa: return svc_sa
+
+    raise RuntimeError("Google Drive 자격정보가 없습니다.")
 
 def drive_preflight(service, folder_id: str) -> bool:
     from googleapiclient.errors import HttpError
@@ -437,7 +451,7 @@ def build_sections(df_today: pd.DataFrame, df_prev: Optional[pd.DataFrame]) -> D
         dc = r.get("discount_percent"); tail = f" (↓{int(dc)}%)" if pd.notnull(dc) else ""
         S["top10"].append(f"{int(r['rank'])}. {name_link} — {price_txt}{tail}")
 
-    # 전일 CSV 없으면 비교 스킵
+    # 전일 CSV 없으면 비교 섹션 생략
     if df_prev is None or not len(df_prev):
         return S
 
@@ -454,7 +468,7 @@ def build_sections(df_today: pd.DataFrame, df_prev: Optional[pd.DataFrame]) -> D
         disp = make_display_name(row.get("brand",""), row.get("product_name",""), include_brand=True)
         return f"<{row['url']}|{slack_escape(disp)}>"
 
-    # 🔥 급상승
+    # 🔥 급상승 (상위 3)
     rising = []
     for k in common:
         prev_rank = int(p30.loc[k,"rank"]); curr_rank = int(t30.loc[k,"rank"])
@@ -465,7 +479,7 @@ def build_sections(df_today: pd.DataFrame, df_prev: Optional[pd.DataFrame]) -> D
     rising.sort(key=lambda x: (-x[0], x[1], x[2], x[3]))
     S["rising"] = [e[-1] for e in rising[:3]]
 
-    # 🆕 뉴랭커
+    # 🆕 뉴랭커 (≤3)
     newcomers = []
     for k in new:
         curr_rank = int(t30.loc[k,"rank"])
@@ -473,7 +487,7 @@ def build_sections(df_today: pd.DataFrame, df_prev: Optional[pd.DataFrame]) -> D
     newcomers.sort(key=lambda x: x[0])
     S["newcomers"] = [line for _, line in newcomers[:3]]
 
-    # 📉 급하락
+    # 📉 급하락 (상위 5)
     falling = []
     for k in common:
         prev_rank = int(p30.loc[k,"rank"]); curr_rank = int(t30.loc[k,"rank"])
@@ -484,7 +498,7 @@ def build_sections(df_today: pd.DataFrame, df_prev: Optional[pd.DataFrame]) -> D
     falling.sort(key=lambda x: (-x[0], x[1], x[2], x[3]))
     S["falling"] = [e[-1] for e in falling[:5]]
 
-    # OUT
+    # OUT (급하락 섹션 바로 아래에 붙임)
     for k in sorted(list(out)):
         prev_rank = int(p30.loc[k,"rank"])
         line,_ = line_move(full_name_link(p30.loc[k]), prev_rank, None)
@@ -531,21 +545,15 @@ def main():
     df_today.to_csv(os.path.join("data", file_today), index=False, encoding="utf-8-sig")
     print("로컬 저장:", file_today)
 
+    # --- Drive 업로드 + 전일 CSV 로드 ---
     df_prev = None
     folder = os.getenv("GDRIVE_FOLDER_ID", "").strip()
     if folder:
         try:
-            prefer = os.getenv("DRIVE_AUTH_MODE","oauth_only").lower()
+            prefer = os.getenv("DRIVE_AUTH_MODE", "oauth_only").lower()
             svc, is_sa = build_drive_service(prefer)
             if not drive_preflight(svc, folder):
-                if is_sa:
-                    print("[Drive] SA → OAuth-only 재시도")
-                    svc, is_sa = build_drive_service("oauth_only")
-                    if not drive_preflight(svc, folder):
-                        raise RuntimeError("Google Drive 폴더 접근 불가: FOLDER_ID/권한 확인 필요")
-                else:
-                    raise RuntimeError("Google Drive 폴더 접근 불가: FOLDER_ID/권한 확인 필요")
-
+                raise RuntimeError("Google Drive 폴더 접근 불가: FOLDER_ID/권한 확인 필요")
             drive_upload_csv(svc, is_sa, folder, file_today, df_today)
             print("Google Drive 업로드 완료:", file_today)
             df_prev = drive_download_csv(svc, folder, file_yesterday)
