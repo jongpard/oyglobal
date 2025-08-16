@@ -10,8 +10,7 @@
   SLACK_WEBHOOK_URL
   GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN
   GDRIVE_FOLDER_ID
-  GDRIVE_SERVICE_ACCOUNT_JSON (선택)
-  DRIVE_AUTH_MODE = oauth_only | oauth | service_account   (기본 oauth_only 권장)
+  DRIVE_AUTH_MODE = oauth_only (권장)
 """
 import os, re, io, math, json, pytz, traceback
 import datetime as dt
@@ -167,7 +166,7 @@ def fetch_by_playwright() -> List[Product]:
                 page.wait_for_timeout(500)
                 return
         except: pass
-        # 커스텀 셀렉터 케이스 (USA → Global)
+        # 커스텀 셀렉터(USA → Global)
         for open_sel in [
             ".cntry-select-box-wrapper .selected-cntry",
             "button[aria-haspopup='listbox']",
@@ -290,110 +289,63 @@ def fetch_products() -> List[Product]:
         print("[HTTP 오류] → Playwright 폴백:", e)
     return fetch_by_playwright()
 
-# ---------- Google Drive ----------
-def build_drive_service(mode: Optional[str] = None):
+# ---------- Google Drive (국내판 스타일: 단순/안정) ----------
+def normalize_folder_id(raw: str) -> str:
+    """URL/공백/쿼리스트링이 들어와도 순수 folderId만 추출"""
+    if not raw: return ""
+    s = raw.strip()
+    m = re.search(r"/folders/([a-zA-Z0-9_-]{10,})", s) or re.search(r"[?&]id=([a-zA-Z0-9_-]{10,})", s)
+    return (m.group(1) if m else s)
+
+def build_drive_service():
     """
-    OAuth-only 기본. invalid_scope가 뜨는 환경을 대비해
-    - scopes=['https://www.googleapis.com/auth/drive'] 시도 후 실패하면
-    - scopes=None(기존 토큰 스코프 재사용)로 재시도.
+    OAuth-only. 스코프 미지정(기존 토큰 스코프 사용)으로 invalid_scope 회피.
     """
     from googleapiclient.discovery import build
     from google.oauth2.credentials import Credentials
-    from google.oauth2 import service_account as gsa
-    from google.auth.exceptions import RefreshError
-
-    mode = (mode or os.getenv("DRIVE_AUTH_MODE", "oauth_only")).lower()
 
     cid  = os.getenv("GOOGLE_CLIENT_ID")
     csec = os.getenv("GOOGLE_CLIENT_SECRET")
     rtk  = os.getenv("GOOGLE_REFRESH_TOKEN")
-    sa_json = os.getenv("GDRIVE_SERVICE_ACCOUNT_JSON", "").strip()
+    if not (cid and csec and rtk):
+        raise RuntimeError("OAuth 자격정보가 없습니다. GOOGLE_CLIENT_ID/SECRET/REFRESH_TOKEN 확인")
 
-    def try_oauth(scopes):
-        creds = Credentials(
-            None,
-            refresh_token=rtk,
-            token_uri="https://oauth2.googleapis.com/token",
-            client_id=cid,
-            client_secret=csec,
-            scopes=scopes,
-        )
-        svc = build("drive", "v3", credentials=creds, cache_discovery=False)
-        # about 호출로 refresh 강제 → invalid_scope 조기 감지
-        svc.about().get(fields="user(displayName,emailAddress)").execute()
-        print(f"[Drive] auth=oauth scopes={'drive' if scopes else 'inherit'}")
-        return svc, False
-
-    def make_service_account():
-        if not sa_json: return None
-        info = json.loads(sa_json)
-        creds = gsa.Credentials.from_service_account_info(
-            info, scopes=["https://www.googleapis.com/auth/drive"]
-        )
-        svc = build("drive", "v3", credentials=creds, cache_discovery=False)
-        print("[Drive] auth=service_account")
-        return svc, True
-
-    if mode in ("oauth", "oauth_only"):
-        if not (cid and csec and rtk):
-            if mode == "oauth_only":
-                raise RuntimeError("OAuth 자격정보가 없습니다. GOOGLE_CLIENT_ID/SECRET/REFRESH_TOKEN 확인")
-        else:
-            try:
-                return try_oauth(["https://www.googleapis.com/auth/drive"])
-            except RefreshError as e:
-                print("[Drive] oauth(drive scope) 실패 → scope 없이 재시도:", e)
-                return try_oauth(None)
-
-    if mode in ("oauth", "service_account"):
-        svc_sa = make_service_account()
-        if svc_sa: return svc_sa
-
-    raise RuntimeError("Google Drive 자격정보가 없습니다.")
-
-def drive_preflight(service, folder_id: str) -> bool:
-    from googleapiclient.errors import HttpError
+    creds = Credentials(
+        None,
+        refresh_token=rtk,
+        token_uri="https://oauth2.googleapis.com/token",
+        client_id=cid,
+        client_secret=csec,
+        # scopes=None  # ← 의도적으로 지정하지 않음
+    )
+    svc = build("drive", "v3", credentials=creds, cache_discovery=False)
     try:
-        meta = service.files().get(
-            fileId=folder_id, fields="id,name,driveId",
-            supportsAllDrives=True,
-        ).execute()
-        print(f"[Drive] folder OK: name='{meta.get('name')}', driveId='{meta.get('driveId','MyDrive')}'")
-        return True
-    except HttpError as e:
-        print("[Drive] folder access error:", e)
-        return False
+        about = svc.about().get(fields="user(displayName,emailAddress)").execute()
+        u = about.get("user", {})
+        print(f"[Drive] user={u.get('displayName')} <{u.get('emailAddress')}>")
+    except Exception as e:
+        print("[Drive] whoami 실패:", e)
+    return svc
 
-def drive_upload_csv(service, is_sa: bool, folder_id: str, name: str, df: pd.DataFrame) -> str:
+def drive_upload_csv(service, folder_id: str, name: str, df: pd.DataFrame) -> str:
     from googleapiclient.http import MediaIoBaseUpload
-    from googleapiclient.errors import HttpError
-
-    def _do_upload(svc):
-        q = f"name = '{name}' and '{folder_id}' in parents and trashed = false"
-        res = svc.files().list(q=q, fields="files(id,name,driveId)",
+    # 동일 파일명 있으면 업데이트, 없으면 생성
+    q = f"name = '{name}' and '{folder_id}' in parents and trashed = false"
+    res = service.files().list(q=q, fields="files(id,name)",
                                supportsAllDrives=True, includeItemsFromAllDrives=True).execute()
-        file_id = res.get("files", [{}])[0].get("id") if res.get("files") else None
+    file_id = res.get("files", [{}])[0].get("id") if res.get("files") else None
 
-        buf = io.BytesIO(); df.to_csv(buf, index=False, encoding="utf-8-sig"); buf.seek(0)
-        media = MediaIoBaseUpload(buf, mimetype="text/csv", resumable=False)
-        if file_id:
-            svc.files().update(fileId=file_id, media_body=media, supportsAllDrives=True).execute()
-            return file_id
-        meta = {"name": name, "parents": [folder_id], "mimeType": "text/csv"}
-        created = svc.files().create(body=meta, media_body=media, fields="id",
+    buf = io.BytesIO(); df.to_csv(buf, index=False, encoding="utf-8-sig"); buf.seek(0)
+    media = MediaIoBaseUpload(buf, mimetype="text/csv", resumable=False)
+
+    if file_id:
+        service.files().update(fileId=file_id, media_body=media, supportsAllDrives=True).execute()
+        return file_id
+
+    meta = {"name": name, "parents": [folder_id], "mimeType": "text/csv"}
+    created = service.files().create(body=meta, media_body=media, fields="id",
                                      supportsAllDrives=True).execute()
-        return created["id"]
-
-    try:
-        return _do_upload(service)
-    except HttpError as e:
-        msg = f"{e}"
-        if is_sa and ("storageQuotaExceeded" in msg or "Service Accounts do not have storage quota" in msg):
-            print("[Drive] SA 403(storageQuotaExceeded) → OAuth-only 재시도")
-            svc2, _ = build_drive_service("oauth_only")
-            if not drive_preflight(svc2, folder_id): raise
-            return _do_upload(svc2)
-        raise
+    return created["id"]
 
 def drive_download_csv(service, folder_id: str, name: str) -> Optional[pd.DataFrame]:
     from googleapiclient.http import MediaIoBaseDownload
@@ -498,7 +450,7 @@ def build_sections(df_today: pd.DataFrame, df_prev: Optional[pd.DataFrame]) -> D
     falling.sort(key=lambda x: (-x[0], x[1], x[2], x[3]))
     S["falling"] = [e[-1] for e in falling[:5]]
 
-    # OUT (급하락 섹션 바로 아래에 붙임)
+    # OUT (급하락 섹션 아래)
     for k in sorted(list(out)):
         prev_rank = int(p30.loc[k,"rank"])
         line,_ = line_move(full_name_link(p30.loc[k]), prev_rank, None)
@@ -545,21 +497,26 @@ def main():
     df_today.to_csv(os.path.join("data", file_today), index=False, encoding="utf-8-sig")
     print("로컬 저장:", file_today)
 
-    # --- Drive 업로드 + 전일 CSV 로드 ---
+    # --- Drive 업로드 + 전일 CSV 로드 (국내판 스타일) ---
     df_prev = None
-    folder = os.getenv("GDRIVE_FOLDER_ID", "").strip()
+    raw_folder = os.getenv("GDRIVE_FOLDER_ID", "")
+    folder = normalize_folder_id(raw_folder)
+
     if folder:
         try:
-            prefer = os.getenv("DRIVE_AUTH_MODE", "oauth_only").lower()
-            svc, is_sa = build_drive_service(prefer)
-            if not drive_preflight(svc, folder):
-                raise RuntimeError("Google Drive 폴더 접근 불가: FOLDER_ID/권한 확인 필요")
-            drive_upload_csv(svc, is_sa, folder, file_today, df_today)
+            mask = folder[:4] + "…" + folder[-4:]
+            print(f"[Drive] folder_id={mask} (normalized)")
+            svc = build_drive_service()
+
+            # 곧바로 업로드/다운로드 (프리플라이트 없음)
+            drive_upload_csv(svc, folder, file_today, df_today)
             print("Google Drive 업로드 완료:", file_today)
+
             df_prev = drive_download_csv(svc, folder, file_yesterday)
             print("전일 CSV", "성공" if df_prev is not None else "미발견")
         except Exception as e:
-            print("Google Drive 처리 오류:", e); traceback.print_exc()
+            print("Google Drive 처리 오류:", e)
+            traceback.print_exc()
     else:
         print("[경고] GDRIVE_FOLDER_ID 미설정 → 드라이브 업로드/전일 비교 생략")
 
