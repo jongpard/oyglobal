@@ -7,8 +7,8 @@
 - 전일 CSV 비교 Top30 → Slack 알림 (전일 없으면 비교 섹션 생략)
 환경변수:
   SLACK_WEBHOOK_URL
-  GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN   # OAuth 권장
-  GDRIVE_SERVICE_ACCOUNT_JSON                                    # 선택(Shared Drive 등)
+  GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN   # OAuth
+  GDRIVE_SERVICE_ACCOUNT_JSON                                    # 선택
   GDRIVE_FOLDER_ID
   DRIVE_AUTH_MODE=oauth|oauth_only|service_account               # 기본 oauth_only 권장
 """
@@ -21,7 +21,6 @@ import requests
 import pandas as pd
 from bs4 import BeautifulSoup
 
-# ---------------- 기본설정/유틸 ----------------
 BEST_URL = "https://global.oliveyoung.com/display/page/best-seller?target=pillsTab1Nav1"
 KST = pytz.timezone("Asia/Seoul")
 
@@ -76,10 +75,13 @@ class Product:
     discount_percent: Optional[int]
     url: str
 
-# ---------------- 정적 파서(스켈레톤이면 0개) ----------------
+# ---------------- 정적 파서 ----------------
 def parse_static_html(html: str) -> List[Product]:
     soup = BeautifulSoup(html, "lxml")
-    cards = soup.select("#orderBestProduct > li.order-best-product")
+    # Global 탭 컨테이너 우선 탐색
+    container = soup.select_one("#pillsTab1Nav1, [id*='pillsTab1Nav1']")
+    root = container or soup
+    cards = root.select("li.order-best-product")
     items: List[Product] = []
     for idx, li in enumerate(cards, start=1):
         name = ""
@@ -105,7 +107,7 @@ def parse_static_html(html: str) -> List[Product]:
             if rnum is not None: rank = int(rnum)
         if rank is None: rank = idx
 
-        # 가격: .price-info 전체 텍스트에서 US$ 금액들 추출 → sale=min, orig=max
+        # 가격: .price-info 전체 텍스트에서 모든 달러 금액 추출 → sale=min, orig=max
         pbox = li.select_one(".price-info") or li
         ptxt = clean_text(pbox.get_text(" ", strip=True))
         nums = [parse_price_to_float(m) for m in re.findall(r"(?:US\$|\$)\s*([\d.,]+)", ptxt)]
@@ -114,7 +116,7 @@ def parse_static_html(html: str) -> List[Product]:
         if len(nums) == 1: sale = nums[0]
         elif len(nums) >= 2: sale, orig = min(nums), max(nums)
 
-        # 보강
+        # 백업 셀렉터
         sale_txt = li.select_one(".price-info strong.point, .price-info strong, .price-info .sale_price, .price-info .price")
         orig_txt = li.select_one(".price-info .original_price, .price-info del, .price-info span")
         if sale is None and sale_txt: sale = parse_price_to_float(sale_txt.get_text())
@@ -124,8 +126,8 @@ def parse_static_html(html: str) -> List[Product]:
         pct_txt = ""
         pct_node = li.select_one(".price-info .rate, .discount-rate, .percent, .dc")
         if pct_node: pct_txt = clean_text(pct_node.get_text())
-
         pct = discount_floor(orig, sale, pct_txt)
+
         if name and link:
             items.append(Product(rank, brand, name, sale, orig, pct, link))
     return items
@@ -143,7 +145,6 @@ def fetch_by_http() -> List[Product]:
 
 def fetch_by_playwright() -> List[Product]:
     from playwright.sync_api import sync_playwright
-    CARD_SEL = "#orderBestProduct > li.order-best-product"
     with sync_playwright() as p:
         browser = p.chromium.launch(
             headless=True,
@@ -153,28 +154,39 @@ def fetch_by_playwright() -> List[Product]:
             viewport={"width":1366,"height":900},
             locale="ko-KR", timezone_id="Asia/Seoul",
             user_agent=("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"),
+            # ✅ country 강제 설정 제거 (미국/한국 고정 방지)
             extra_http_headers={"Accept-Language":"ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7"},
         )
         context.add_init_script("Object.defineProperty(navigator,'webdriver',{get:()=>undefined});")
-        context.add_init_script("""try{localStorage.setItem('country','KR');localStorage.setItem('currency','USD');}catch(e){}""")
 
         page = context.new_page()
         page.goto(BEST_URL, wait_until="domcontentloaded", timeout=60_000)
         try: page.wait_for_load_state("networkidle", timeout=30_000)
         except: pass
+
+        # ✅ Global 탭 강제 선택
+        for sel in ["[href*='pillsTab1Nav1']", "#pillsTab1Nav1-tab", "[data-bs-target='#pillsTab1Nav1']"]:
+            try:
+                page.locator(sel).first.click(timeout=1500)
+                break
+            except: pass
+
+        # 배너 닫기
         for sel in ["#onetrust-accept-btn-handler","button:has-text('Accept')","button:has-text('확인')","[aria-label='Close']"]:
             try: page.locator(sel).first.click(timeout=1200)
             except: pass
+
         for _ in range(8):
             try: page.mouse.wheel(0,2200); page.wait_for_timeout(600)
             except: break
-        page.wait_for_selector(CARD_SEL, timeout=60_000)
 
         data = page.evaluate("""
-            (SEL) => {
-              const nodes = Array.from(document.querySelectorAll(SEL));
+            () => {
+              const container = document.querySelector("#pillsTab1Nav1, [id*='pillsTab1Nav1']") || document;
+              const nodes = Array.from(container.querySelectorAll("li.order-best-product"));
               const get = (el, s) => (el.querySelector(s)?.textContent || '').replace(/\\s+/g,' ').trim();
               const amt = t => { if(!t) return null; const v=parseFloat(t.replace(/US\\$|\\$|,/g,'').trim()); return isNaN(v)?null:v; };
+
               return nodes.map((el, idx) => {
                 const name  = (el.querySelector("input[name='prdtName']")?.value || '').trim();
                 const brand = get(el, "dl.brand-info dt, .brand, .brand_name, .brandName");
@@ -182,7 +194,6 @@ def fetch_by_playwright() -> List[Product]:
                 const rtxt  = get(el, ".rank-badge span, .rank_num");
                 const rank  = parseInt(rtxt) || (idx+1);
 
-                // 가격: .price-info 전체 텍스트 → 모든 달러 금액 추출
                 const pbox  = el.querySelector(".price-info") || el;
                 const ptxt  = (pbox.textContent || '').replace(/\\s+/g,' ').trim();
                 const nums  = Array.from(ptxt.matchAll(/(?:US\\$|\\$)\\s*([\\d.,]+)/g))
@@ -192,7 +203,6 @@ def fetch_by_playwright() -> List[Product]:
                 if (nums.length===1){ sale=nums[0]; }
                 else if (nums.length>=2){ sale=Math.min(...nums); orig=Math.max(...nums); }
 
-                // 백업 셀렉터
                 if (sale==null) sale = amt(get(el, ".price-info strong.point, .price-info strong, .price-info .sale_price, .price-info .price"));
                 if (orig==null) orig = amt(get(el, ".price-info .original_price, .price-info del, .price-info span"));
                 if (sale==null && orig!=null) sale = orig;
@@ -201,7 +211,8 @@ def fetch_by_playwright() -> List[Product]:
                 return {rank, brand, name, link, sale, orig, pctTxt};
               }).filter(x => x.name && x.link);
             }
-        """, CARD_SEL)
+        """)
+
         context.close(); browser.close()
 
     items: List[Product] = []
@@ -233,9 +244,7 @@ def build_drive_service(mode: Optional[str] = None):
     from google.oauth2.credentials import Credentials
     from google.oauth2 import service_account as gsa
 
-    scopes = ["https://www.googleapis.com/auth/drive"]
-    if mode is None:
-        mode = os.getenv("DRIVE_AUTH_MODE", "oauth_only").lower()
+    mode = (mode or os.getenv("DRIVE_AUTH_MODE", "oauth_only")).lower()
 
     cid  = os.getenv("GOOGLE_CLIENT_ID")
     csec = os.getenv("GOOGLE_CLIENT_SECRET")
@@ -244,42 +253,31 @@ def build_drive_service(mode: Optional[str] = None):
 
     def make_oauth():
         if not (cid and csec and rtk): return None
+        # ✅ scopes 미전달 → 기존 refresh token의 스코프 그대로 사용 (invalid_scope 방지)
         return Credentials(None, refresh_token=rtk, token_uri="https://oauth2.googleapis.com/token",
-                           client_id=cid, client_secret=csec, scopes=scopes)
+                           client_id=cid, client_secret=csec)
 
     def make_sa():
         if not sa_json: return None
         info = json.loads(sa_json)
-        return gsa.Credentials.from_service_account_info(info, scopes=scopes)
+        return gsa.Credentials.from_service_account_info(info, scopes=["https://www.googleapis.com/auth/drive"])
 
-    creds = None
-    used = "unknown"
-
+    used = None; creds = None
     if mode in ("oauth", "oauth_only"):
-        creds = make_oauth()
-        if creds:
-            used = "oauth"
-        elif mode == "oauth_only":
+        creds = make_oauth(); used = "oauth" if creds else None
+        if not creds and mode == "oauth_only":
             raise RuntimeError("OAuth 자격정보가 없습니다. GOOGLE_CLIENT_ID/SECRET/REFRESH_TOKEN 확인")
+    if not creds and mode in ("oauth", "service_account"):
+        creds = make_sa(); used = "service_account" if creds else None
+    if not creds: raise RuntimeError("Google Drive 자격정보가 없습니다.")
 
-    if creds is None and mode in ("oauth", "service_account"):
-        sa_creds = make_sa()
-        if sa_creds:
-            creds = sa_creds
-            used = "service_account"
-
-    if creds is None: raise RuntimeError("Google Drive 자격정보가 없습니다.")
-    print(f"[Drive] auth={used}")
     svc = build("drive", "v3", credentials=creds, cache_discovery=False)
-
-    # 로그인 사용자 출력
+    print(f"[Drive] auth={used}")
     try:
         about = svc.about().get(fields="user(displayName,emailAddress)").execute()
-        u = about.get("user", {})
-        print(f"[Drive] user={u.get('displayName')} <{u.get('emailAddress')}>")
+        print(f"[Drive] user={about.get('user',{}).get('displayName')} <{about.get('user',{}).get('emailAddress')}>")
     except Exception as e:
         print("[Drive] whoami 실패:", e)
-
     return svc, (used == "service_account")
 
 def drive_preflight(service, folder_id: str) -> bool:
@@ -302,10 +300,8 @@ def drive_upload_csv(service, is_sa: bool, folder_id: str, name: str, df: pd.Dat
 
     def _do_upload(svc):
         q = f"name = '{name}' and '{folder_id}' in parents and trashed = false"
-        res = svc.files().list(
-            q=q, fields="files(id,name,driveId)",
-            supportsAllDrives=True, includeItemsFromAllDrives=True
-        ).execute()
+        res = svc.files().list(q=q, fields="files(id,name,driveId)",
+                               supportsAllDrives=True, includeItemsFromAllDrives=True).execute()
         file_id = res.get("files", [{}])[0].get("id") if res.get("files") else None
 
         buf = io.BytesIO(); df.to_csv(buf, index=False, encoding="utf-8-sig"); buf.seek(0)
@@ -314,7 +310,8 @@ def drive_upload_csv(service, is_sa: bool, folder_id: str, name: str, df: pd.Dat
             svc.files().update(fileId=file_id, media_body=media, supportsAllDrives=True).execute()
             return file_id
         meta = {"name": name, "parents": [folder_id], "mimeType": "text/csv"}
-        created = svc.files().create(body=meta, media_body=media, fields="id", supportsAllDrives=True).execute()
+        created = svc.files().create(body=meta, media_body=media, fields="id",
+                                     supportsAllDrives=True).execute()
         return created["id"]
 
     try:
@@ -324,18 +321,15 @@ def drive_upload_csv(service, is_sa: bool, folder_id: str, name: str, df: pd.Dat
         if is_sa and ("storageQuotaExceeded" in msg or "Service Accounts do not have storage quota" in msg):
             print("[Drive] SA 403(storageQuotaExceeded) → OAuth-only 재시도")
             svc2, _ = build_drive_service("oauth_only")
-            if not drive_preflight(svc2, folder_id):
-                raise
+            if not drive_preflight(svc2, folder_id): raise
             return _do_upload(svc2)
         raise
 
 def drive_download_csv(service, folder_id: str, name: str) -> Optional[pd.DataFrame]:
     from googleapiclient.http import MediaIoBaseDownload
-    res = service.files().list(
-        q=f"name = '{name}' and '{folder_id}' in parents and trashed = false",
-        fields="files(id,name)",
-        supportsAllDrives=True, includeItemsFromAllDrives=True
-    ).execute()
+    res = service.files().list(q=f"name = '{name}' and '{folder_id}' in parents and trashed = false",
+                               fields="files(id,name)", supportsAllDrives=True,
+                               includeItemsFromAllDrives=True).execute()
     files = res.get("files", [])
     if not files: return None
     fid = files[0]["id"]
@@ -487,7 +481,6 @@ def main():
             prefer = os.getenv("DRIVE_AUTH_MODE","oauth_only").lower()
             svc, is_sa = build_drive_service(prefer)
 
-            # 폴더 접근 프리체크
             if not drive_preflight(svc, folder):
                 if is_sa:
                     print("[Drive] SA → OAuth-only 재시도")
