@@ -8,10 +8,10 @@
 
 필요 환경변수:
   SLACK_WEBHOOK_URL
-  GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN   # OAuth
-  GDRIVE_SERVICE_ACCOUNT_JSON                                    # (선택)
+  GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN
   GDRIVE_FOLDER_ID
-  DRIVE_AUTH_MODE=oauth|oauth_only|service_account               # 기본 oauth_only 권장
+  GDRIVE_SERVICE_ACCOUNT_JSON (선택)
+  DRIVE_AUTH_MODE=oauth_only (권장)
 """
 import os, re, io, math, json, pytz, traceback, datetime as dt
 from dataclasses import dataclass
@@ -70,19 +70,19 @@ class Product:
     discount_percent: Optional[int]
     url: str
 
-# ---------- 정적 파싱 ----------
+# ---------- 정적 파싱 (있으면 사용, 없으면 0개) ----------
 def parse_static_html(html: str) -> List[Product]:
     soup = BeautifulSoup(html, "lxml")
     container = soup.select_one("#pillsTab1Nav1, [id*='pillsTab1Nav1']")
     root = container or soup
-    cards = root.select("li.order-best-product")
+    cards = root.select("li.order-best-product, li[data-ga-label='best']")
     items: List[Product] = []
     for idx, li in enumerate(cards, start=1):
         name = ""
         inp = li.select_one("input[name='prdtName']")
         if inp and inp.has_attr("value"): name = clean_text(inp["value"])
         if not name:
-            nm = li.select_one(".product_name, .name, .tit, .item_name")
+            nm = li.select_one(".product_name, .name, .tit, .item_name, .prd_name")
             if nm: name = clean_text(nm.get_text(" ", strip=True))
 
         brand = ""
@@ -90,7 +90,7 @@ def parse_static_html(html: str) -> List[Product]:
         if b: brand = clean_text(b.get_text(" ", strip=True))
 
         link = ""
-        a = li.select_one("a")
+        a = li.select_one("a[href]")
         if a and a.has_attr("href"): link = a["href"]
         if link.startswith("/"): link = "https://global.oliveyoung.com" + link
 
@@ -101,7 +101,6 @@ def parse_static_html(html: str) -> List[Product]:
             if rnum is not None: rank = int(rnum)
         if rank is None: rank = idx
 
-        # 가격: .price-info 전체 텍스트의 모든 달러 금액 → sale=min, orig=max
         pbox = li.select_one(".price-info") or li
         ptxt = clean_text(pbox.get_text(" ", strip=True))
         nums = [parse_price_to_float(m) for m in re.findall(r"(?:US\$|\$)\s*([\d.,]+)", ptxt)]
@@ -110,7 +109,6 @@ def parse_static_html(html: str) -> List[Product]:
         if len(nums) == 1: sale = nums[0]
         elif len(nums) >= 2: sale, orig = min(nums), max(nums)
 
-        # 보강 셀렉터
         sale_txt = li.select_one(".price-info strong.point, .price-info strong, .price-info .sale_price, .price-info .price")
         orig_txt = li.select_one(".price-info .original_price, .price-info del, .price-info span")
         if sale is None and sale_txt: sale = parse_price_to_float(sale_txt.get_text())
@@ -136,15 +134,15 @@ def fetch_by_http() -> List[Product]:
     r.raise_for_status()
     return parse_static_html(r.text)
 
-# ---------- Playwright 파싱(강화) ----------
+# ---------- Playwright (강화: 지역 Global 전환 + 폴링 대기) ----------
 def fetch_by_playwright() -> List[Product]:
-    """동적 렌더링 강제 대기 + Global 탭 고정 + 견고한 셀렉터."""
+    """동적 렌더링 강제 대기 + 지역 드롭다운을 Global로 전환 + 견고한 셀렉터."""
     from playwright.sync_api import sync_playwright
     import time, pathlib
 
     CARD_SELS = [
         "#pillsTab1Nav1 li.order-best-product",
-        "#pillsTab1Nav1 li[class*='order-best']",
+        "#pillsTab1Nav1 li[data-ga-label='best']",
         "#pillsTab1Nav1 li",
     ]
 
@@ -154,20 +152,65 @@ def fetch_by_playwright() -> List[Product]:
             f.write(page.content())
         page.screenshot(path=f"data/debug/page_{tag}.png", full_page=True)
 
+    def _force_region_global(page):
+        # 헤더의 지역(USA/Global) 드롭다운 열기 → Global 선택
+        opened = False
+        for sel in [
+            "button[aria-haspopup='listbox']",
+            "button:has-text('USA')",
+            "[role='button']:has-text('USA')",
+            "header :has-text('USA') >> xpath=ancestor::*[self::button or @role='button'][1]",
+        ]:
+            try:
+                page.locator(sel).first.click(timeout=1200)
+                opened = True
+                break
+            except:
+                pass
+        if opened:
+            for opt in [
+                "[role='option']:has-text('Global')",
+                "li:has-text('Global')",
+                "text=Global",
+            ]:
+                try:
+                    page.locator(opt).first.click(timeout=1200)
+                    break
+                except:
+                    pass
+        # 페이지 내부 탭도 강제로 Global 영역 선택
+        for sel in [
+            "[href*='pillsTab1Nav1']",
+            "#pillsTab1Nav1-tab",
+            "[data-bs-target='#pillsTab1Nav1']",
+            "button:has-text('Top Orders')",
+        ]:
+            try:
+                page.locator(sel).first.click(timeout=1500)
+                break
+            except:
+                pass
+
     with sync_playwright() as p:
         browser = p.chromium.launch(
             headless=True,
-            args=["--disable-blink-features=AutomationControlled","--no-sandbox","--disable-dev-shm-usage"],
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+            ],
         )
         context = browser.new_context(
             viewport={"width":1366,"height":900},
             locale="en-US",
             timezone_id="Asia/Seoul",
             user_agent=("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"),
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/123.0.0.0 Safari/537.36"),
             extra_http_headers={"Accept-Language":"en-US,en;q=0.9"},
         )
         context.add_init_script("Object.defineProperty(navigator,'webdriver',{get:()=>undefined});")
+
         page = context.new_page()
         page.goto(BEST_URL, wait_until="domcontentloaded", timeout=60_000)
         try: page.wait_for_load_state("networkidle", timeout=30_000)
@@ -178,34 +221,27 @@ def fetch_by_playwright() -> List[Product]:
             try: page.locator(sel).first.click(timeout=1200)
             except: pass
 
-        # Global 탭 강제
-        clicked = False
-        for sel in ["[href*='pillsTab1Nav1']","#pillsTab1Nav1-tab","[data-bs-target='#pillsTab1Nav1']","button:has-text('Global')"]:
-            try: page.locator(sel).first.click(timeout=1500); clicked = True; break
-            except: pass
-        if not clicked:
-            try:
-                page.mouse.wheel(0, 1500)
-                page.locator("[href*='pillsTab1Nav1']").first.click(timeout=1500)
-            except: pass
+        # ✅ 지역을 Global로 전환
+        _force_region_global(page)
 
-        # 컨텐츠 렌더링 폴링 (최대 30s)
+        # 컨텐츠 렌더링 폴링 (최대 35s)
         start = time.time(); found = 0
-        while time.time() - start < 30:
-            try: page.mouse.wheel(0, 1200)
+        while time.time() - start < 35:
+            try: page.mouse.wheel(0, 1400)
             except: pass
             for sel in CARD_SELS:
                 try: found = page.eval_on_selector_all(sel, "els => els.length")
                 except: found = 0
                 if found and found >= 10: break
             if found and found >= 10: break
-            page.wait_for_timeout(700)
+            page.wait_for_timeout(800)
 
         if not (found and found >= 10):
             _debug_dump(page, "global_empty")
             context.close(); browser.close()
             return []
 
+        # 데이터 추출
         data = page.evaluate("""
             (sels) => {
               const root = document.querySelector("#pillsTab1Nav1, [id*='pillsTab1Nav1']") || document;
@@ -214,7 +250,7 @@ def fetch_by_playwright() -> List[Product]:
               let nodes = [];
               for (const s of sels) { nodes = Array.from(root.querySelectorAll(s)); if (nodes.length >= 10) break; }
               return nodes.map((el, i) => {
-                const name  = (el.querySelector("input[name='prdtName']")?.value || pick(el, ".product_name, .name, .tit, .item_name"));
+                const name  = (el.querySelector("input[name='prdtName']")?.value || pick(el, ".product_name, .name, .tit, .item_name, .prd_name"));
                 const brand = pick(el, "dl.brand-info dt, .brand, .brand_name, .brandName");
                 const link  = el.querySelector("a")?.href || '';
                 const rtxt  = pick(el, ".rank-badge span, .rank_num");
@@ -260,12 +296,6 @@ def fetch_products() -> List[Product]:
 
 # ---------- Google Drive ----------
 def build_drive_service(mode: Optional[str] = None):
-    """
-    mode:
-      - "oauth" (기본): OAuth 우선, 없으면 SA
-      - "oauth_only": OAuth만, 없으면 에러
-      - "service_account": SA만, 없으면 에러
-    """
     from googleapiclient.discovery import build
     from google.oauth2.credentials import Credentials
     from google.oauth2 import service_account as gsa
@@ -279,7 +309,7 @@ def build_drive_service(mode: Optional[str] = None):
 
     def make_oauth():
         if not (cid and csec and rtk): return None
-        # scopes 미전달 → 기존 refresh token의 스코프 그대로 사용 (invalid_scope 방지)
+        # scopes 미전달 → refresh token 스코프 그대로 사용
         return Credentials(None, refresh_token=rtk, token_uri="https://oauth2.googleapis.com/token",
                            client_id=cid, client_secret=csec)
 
@@ -384,7 +414,6 @@ def to_dataframe(products: List[Product], date_str: str) -> pd.DataFrame:
         "orig_price": p.orig_price,
         "discount_percent": p.discount_percent,
         "url": p.url,
-        "otuk": False if p.rank is not None else True,
     } for p in products])
 
 def line_move(name_link: str, prev_rank: Optional[int], curr_rank: Optional[int]) -> Tuple[str, int]:
@@ -408,7 +437,7 @@ def build_sections(df_today: pd.DataFrame, df_prev: Optional[pd.DataFrame]) -> D
         dc = r.get("discount_percent"); tail = f" (↓{int(dc)}%)" if pd.notnull(dc) else ""
         S["top10"].append(f"{int(r['rank'])}. {name_link} — {price_txt}{tail}")
 
-    # 전일 CSV 없으면 비교 섹션 스킵
+    # 전일 CSV 없으면 비교 스킵
     if df_prev is None or not len(df_prev):
         return S
 
@@ -425,6 +454,7 @@ def build_sections(df_today: pd.DataFrame, df_prev: Optional[pd.DataFrame]) -> D
         disp = make_display_name(row.get("brand",""), row.get("product_name",""), include_brand=True)
         return f"<{row['url']}|{slack_escape(disp)}>"
 
+    # 🔥 급상승
     rising = []
     for k in common:
         prev_rank = int(p30.loc[k,"rank"]); curr_rank = int(t30.loc[k,"rank"])
@@ -435,6 +465,7 @@ def build_sections(df_today: pd.DataFrame, df_prev: Optional[pd.DataFrame]) -> D
     rising.sort(key=lambda x: (-x[0], x[1], x[2], x[3]))
     S["rising"] = [e[-1] for e in rising[:3]]
 
+    # 🆕 뉴랭커
     newcomers = []
     for k in new:
         curr_rank = int(t30.loc[k,"rank"])
@@ -442,6 +473,7 @@ def build_sections(df_today: pd.DataFrame, df_prev: Optional[pd.DataFrame]) -> D
     newcomers.sort(key=lambda x: x[0])
     S["newcomers"] = [line for _, line in newcomers[:3]]
 
+    # 📉 급하락
     falling = []
     for k in common:
         prev_rank = int(p30.loc[k,"rank"]); curr_rank = int(t30.loc[k,"rank"])
@@ -452,6 +484,7 @@ def build_sections(df_today: pd.DataFrame, df_prev: Optional[pd.DataFrame]) -> D
     falling.sort(key=lambda x: (-x[0], x[1], x[2], x[3]))
     S["falling"] = [e[-1] for e in falling[:5]]
 
+    # OUT
     for k in sorted(list(out)):
         prev_rank = int(p30.loc[k,"rank"])
         line,_ = line_move(full_name_link(p30.loc[k]), prev_rank, None)
@@ -461,14 +494,17 @@ def build_sections(df_today: pd.DataFrame, df_prev: Optional[pd.DataFrame]) -> D
     return S
 
 def build_slack_message(date_str: str, S: Dict[str, List[str]]) -> str:
-    parts = [f"*올리브영 글로벌몰 랭킹 — {date_str}*", "",
-             "*TOP 10*"] + (S["top10"] or ["- 데이터 없음"]) + ["",
-             "*🔥 급상승*"] + (S["rising"] or ["- 해당 없음"]) + ["",
-             "*🆕 뉴랭커*"] + (S["newcomers"] or ["- 해당 없음"]) + ["",
-             "*📉 급하락*"] + (S["falling"] or ["- 해당 없음"])
-    parts += S.get("outs", [])
-    parts += ["", "*🔄 랭크 인&아웃*", f"{S.get('inout_count', 0)}개의 제품이 인&아웃 되었습니다."]
-    return "\n".join(parts)
+    lines: List[str] = []
+    lines.append(f"*올리브영 글로벌몰 랭킹 — {date_str}*")
+    lines.append("")
+    lines.append("*TOP 10*");          lines.extend(S.get("top10") or ["- 데이터 없음"]); lines.append("")
+    lines.append("*🔥 급상승*");       lines.extend(S.get("rising") or ["- 해당 없음"]); lines.append("")
+    lines.append("*🆕 뉴랭커*");       lines.extend(S.get("newcomers") or ["- 해당 없음"]); lines.append("")
+    lines.append("*📉 급하락*");       lines.extend(S.get("falling") or ["- 해당 없음"])
+    lines.extend(S.get("outs") or [])
+    lines.append(""); lines.append("*🔄 랭크 인&아웃*")
+    lines.append(f"{S.get('inout_count', 0)}개의 제품이 인&아웃 되었습니다.")
+    return "\n".join(lines)
 
 # ---------- 메인 ----------
 def main():
