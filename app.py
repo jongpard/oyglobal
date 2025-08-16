@@ -1,12 +1,11 @@
 # -*- coding: utf-8 -*-
 """
 올리브영 글로벌몰 베스트셀러 랭킹 수집/비교/알림 (USD)
-- 데이터 소스: https://global.oliveyoung.com/display/page/best-seller?target=pillsTab1Nav1
-- HTTP → 실패/부족 시 Playwright
-- 파일명: 올리브영글로벌_랭킹_YYYY-MM-DD.csv (KST)
-- 전일 CSV 비교(Top30 기준) → Slack 알림
+- HTTP → 실패/부족 시 Playwright(stealth, 지역 강제, XHR 스니핑)
+- 저장: 올리브영글로벌_랭킹_YYYY-MM-DD.csv (KST)
+- 전일 CSV 비교(Top30) → Slack 알림
 """
-import os, re, io, math, json, pytz, traceback
+import os, re, io, json, math, pytz, traceback, base64, random
 import datetime as dt
 from dataclasses import dataclass
 from typing import List, Dict, Optional, Tuple
@@ -18,14 +17,17 @@ from bs4 import BeautifulSoup
 BEST_URL = "https://global.oliveyoung.com/display/page/best-seller?target=pillsTab1Nav1"
 KST = pytz.timezone("Asia/Seoul")
 
-# ---------- 공통 유틸 ----------
+# ---------------- 날짜/유틸 ----------------
 def now_kst(): return dt.datetime.now(KST)
 def today_kst_str(): return now_kst().strftime("%Y-%m-%d")
 def yesterday_kst_str(): return (now_kst() - dt.timedelta(days=1)).strftime("%Y-%m-%d")
 def build_filename(d): return f"올리브영글로벌_랭킹_{d}.csv"
 
+def ensure_dir(p):
+    os.makedirs(p, exist_ok=True)
+
 def to_float(s):
-    if not s: return None
+    if s is None: return None
     m = re.findall(r"[\d]+(?:\.[\d]+)?", str(s))
     return float(m[0]) if m else None
 
@@ -39,20 +41,16 @@ def extract_percent_floor(orig_price, sale_price, percent_text):
     return None
 
 def clean_text(s): return re.sub(r"\s+", " ", (s or "")).strip()
+def slack_escape(s): return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+def fmt_currency_usd(v): return f"${(v or 0):,.2f}"
 
-def remove_brand_from_title(title, brand):
+def remove_brand_from_title(title: str, brand: str) -> str:
     t, b = clean_text(title), clean_text(brand)
     if not b: return t
-    for pat in [
-        rf"^\[?\s*{re.escape(b)}\s*\]?\s*[-–—:|]*\s*",
-        rf"^\(?\s*{re.escape(b)}\s*\)?\s*[-–—:|]*\s*",
-    ]:
+    for pat in [rf"^\[?\s*{re.escape(b)}\s*\]?\s*[-–—:|]*\s*", rf"^\(?\s*{re.escape(b)}\s*\)?\s*[-–—:|]*\s*"]:
         t2 = re.sub(pat, "", t, flags=re.I)
         if t2 != t: return t2.strip()
     return t
-
-def slack_escape(s): return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-def fmt_currency_usd(v): return f"${(v or 0):,.2f}"
 
 @dataclass
 class Product:
@@ -64,7 +62,7 @@ class Product:
     discount_percent: Optional[int]
     url: str
 
-# ---------- HTML 파서 ----------
+# ---------------- 파서 ----------------
 def parse_cards_from_html(html: str) -> List[Product]:
     soup = BeautifulSoup(html, "lxml")
     item_selectors = [
@@ -74,7 +72,8 @@ def parse_cards_from_html(html: str) -> List[Product]:
         "li.prod_item",
         "ul li",
         "div.prod_area",
-        "div.product_item, div.item"  # 여유 셀렉터
+        "div.product_item",
+        "div.item"
     ]
     name_selectors = [".product_name", ".prod_name", ".name", ".tit", ".tx_name", ".item_name", "a[title]"]
     brand_selectors = [".brand", ".brand_name", ".tx_brand", ".brandName"]
@@ -119,11 +118,13 @@ def parse_cards_from_html(html: str) -> List[Product]:
             items.append(Product(idx, brand, title, sale, orig, pct, link))
     return items
 
-# ---------- 1) HTTP 시도 ----------
+# ---------------- HTTP 시도 ----------------
 def fetch_by_http() -> List[Product]:
     hdrs = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept-Language": "en-US,en;q=0.9",
+        # 일부 사이트가 최신 크롬 UA를 요구
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+        # 메모: ‘한국에서 접속해야 보인다’ 이슈를 고려해 ko 우선
+        "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
         "Cache-Control": "no-cache",
         "Pragma": "no-cache",
     }
@@ -131,158 +132,225 @@ def fetch_by_http() -> List[Product]:
     r.raise_for_status()
     return parse_cards_from_html(r.text)
 
-# ---------- 2) Playwright 폴백 (강화) ----------
+# ---------------- Playwright 폴백(stealth + 지역/통화 강제 + XHR 스니핑) ----------------
 def fetch_by_playwright() -> List[Product]:
     from playwright.sync_api import sync_playwright
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        context = p.chromium.launch_persistent_context(
-            user_data_dir="/tmp/oyg",
-            headless=True,
-            locale="en-US",
-            timezone_id="America/Los_Angeles",
-            geolocation={"latitude": 37.7749, "longitude": -122.4194},  # US
-            permissions=["geolocation"],
-            user_agent=("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                        "AppleWebKit/537.36 (KHTML, like Gecko) "
-                        "Chrome/120.0.0.0 Safari/537.36"),
-            extra_http_headers={"Accept-Language": "en-US,en;q=0.9"},
-        )
+    def try_once(country_code: str, currency_code: str, accept_lang: str) -> Tuple[List[Product], dict]:
+        with sync_playwright() as p:
+            # Stealth에 유리한 args
+            browser = p.chromium.launch(
+                headless=True,
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--disable-dev-shm-usage",
+                    "--no-sandbox",
+                ],
+            )
+            context = browser.new_context(
+                viewport={"width": 1366, "height": 900},
+                locale=accept_lang.split(",")[0],
+                timezone_id="Asia/Seoul" if country_code=="KR" else "America/Los_Angeles",
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/123.0.0.0 Safari/537.36"
+                ),
+                extra_http_headers={"Accept-Language": accept_lang},
+            )
 
-        page = context.pages[0] if context.pages else context.new_page()
+            # webdriver 흔적 제거
+            context.add_init_script("""
+                Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+                window.chrome = { runtime: {} };
+                const originalQuery = window.navigator.permissions.query;
+                window.navigator.permissions.query = (parameters) => (
+                  parameters.name === 'notifications'
+                    ? Promise.resolve({ state: Notification.permission })
+                    : originalQuery(parameters)
+                );
+                const getParameter = WebGLRenderingContext.prototype.getParameter;
+                WebGLRenderingContext.prototype.getParameter = function(param){
+                  if (param === 37445) return 'Intel Open Source Technology Center';
+                  if (param === 37446) return 'Mesa DRI Intel(R) UHD Graphics 620 (Kabylake GT2)';
+                  return getParameter.call(this, param);
+                };
+                try {
+                  localStorage.setItem('country', '%s');
+                  localStorage.setItem('oy-country', '%s');
+                  localStorage.setItem('currency', '%s');
+                  localStorage.setItem('oy-currency', '%s');
+                  localStorage.setItem('locale', '%s');
+                } catch(e){}
+            """ % (country_code, country_code, currency_code, currency_code, accept_lang.split(",")[0]))
 
-        # 지역/통화 강제(추정 키 포함) — 존재하지 않아도 무해
-        page.add_init_script("""
-            try {
-              localStorage.setItem('country', 'US');
-              localStorage.setItem('oy-country', 'US');
-              localStorage.setItem('currency', 'USD');
-              localStorage.setItem('oy-currency', 'USD');
-              localStorage.setItem('locale', 'en-US');
-            } catch(e){}
-        """)
-        # 쿠키도 미리 세팅(있으면 사용)
-        try:
-            context.add_cookies([
-                {"name": "country", "value": "US", "domain": "global.oliveyoung.com", "path": "/"},
-                {"name": "currency", "value": "USD", "domain": "global.oliveyoung.com", "path": "/"},
-            ])
-        except: pass
-
-        page.goto(BEST_URL, wait_until="domcontentloaded", timeout=60_000)
-        try: page.wait_for_load_state("networkidle", timeout=30_000)
-        except: pass
-
-        # 쿠키/동의/팝업 닫기
-        for sel in [
-            "button#onetrust-accept-btn-handler",
-            "button:has-text('Accept All')",
-            "button:has-text('Accept')",
-            "button:has-text('동의')",
-            "button:has-text('확인')",
-            "[aria-label='Close']",
-            "button:has-text('Don’t open this window')",
-        ]:
-            try: page.locator(sel).first.click(timeout=1500)
-            except: pass
-
-        # 탭 강제: Global / Top Orders / All / USA
-        for txt in ["Global", "Top Orders", "All", "USA", "United States"]:
+            # 쿠키도 같이 세팅(없어도 무해)
             try:
-                page.get_by_text(txt, exact=False).first.click(timeout=1500)
-                page.wait_for_timeout(500)
+                context.add_cookies([
+                    {"name":"country", "value":country_code, "domain":"global.oliveyoung.com", "path":"/"},
+                    {"name":"currency","value":currency_code,"domain":"global.oliveyoung.com","path":"/"},
+                ])
             except: pass
 
-        # 지연 로딩 유도
-        try:
-            for _ in range(10):
-                page.mouse.wheel(0, 2200)
-                page.wait_for_timeout(700)
-            page.mouse.wheel(0, -8000)
-            page.wait_for_timeout(700)
-        except: pass
+            page = context.new_page()
 
-        # 1차: 브라우저 DOM에서 긁기
-        data = page.evaluate("""
-            () => {
-              const pick = (el, sels) => {
-                for (const s of sels) {
-                  const x = el.querySelector(s);
-                  if (x) { const t=(x.textContent||'').replace(/\\s+/g,' ').trim(); if(t) return t; }
+            # XHR(JSON) 스니핑
+            sniff = {"jsons": []}
+            def on_response(resp):
+                try:
+                    ct = resp.headers.get("content-type","")
+                    url = resp.url
+                    if ("application/json" in ct or url.endswith(".json")) and any(k in url.lower() for k in ["best", "rank", "list"]):
+                        sniff["jsons"].append({"url": url, "body": resp.text()})
+                except: pass
+            page.on("response", on_response)
+
+            page.goto(BEST_URL, wait_until="domcontentloaded", timeout=60_000)
+            try: page.wait_for_load_state("networkidle", timeout=30_000)
+            except: pass
+
+            # 팝업/동의 닫기
+            for sel in [
+                "#onetrust-accept-btn-handler",
+                "button:has-text('Accept All')",
+                "button:has-text('Accept')",
+                "button:has-text('동의')",
+                "button:has-text('확인')",
+                "[aria-label='Close']",
+            ]:
+                try: page.locator(sel).first.click(timeout=1200)
+                except: pass
+
+            # 탭/필터 클릭 시도 (있으면)
+            for t in ["BEST", "Best", "BEST SELLER", "Best Seller", "All", "전체"]:
+                try:
+                    page.get_by_text(t, exact=False).first.click(timeout=1200)
+                    page.wait_for_timeout(400)
+                except: pass
+
+            # 스크롤로 지연로딩 유도
+            try:
+                for _ in range(10):
+                    page.mouse.wheel(0, 2200); page.wait_for_timeout(600)
+                page.mouse.wheel(0, -8000); page.wait_for_timeout(600)
+            except: pass
+
+            # 1차: DOM 파싱
+            data = page.evaluate("""
+                () => {
+                  const pick = (el, sels) => {
+                    for (const s of sels) {
+                      const x = el.querySelector(s);
+                      if (x) { const t=(x.textContent||'').replace(/\\s+/g,' ').trim(); if(t) return t; }
+                    }
+                    return '';
+                  };
+                  const pickLink = (el, sels) => {
+                    for (const s of sels) {
+                      const a = el.querySelector(s);
+                      if (a && a.href && !a.href.startsWith('javascript')) return a.href;
+                    }
+                    return '';
+                  };
+                  const itemSelectors = [
+                    'ul.tab_cont_list li','ul.best_list li','ul#bestSellerContent li',
+                    'li.prod_item','ul li','div.prod_area','div.product_item','div.item'
+                  ];
+                  const nameSelectors = ['.product_name','.prod_name','.name','.tit','.tx_name','.item_name','a[title]'];
+                  const brandSelectors = ['.brand','.brand_name','.tx_brand','.brandName'];
+                  const linkSelectors  = ['a.prod_link','a.link','a.detail_link','a'];
+                  const priceSelectors = ['.price .num','.sale_price','.discount_price','.final_price','.price','.value'];
+                  const origSelectors  = ['.orig_price','.normal_price','.consumer','.strike','.was'];
+                  const percentSelectors = ['.percent','.dc','.discount_rate','.rate'];
+
+                  let nodes = [];
+                  for (const s of itemSelectors) {
+                    const found = Array.from(document.querySelectorAll(s));
+                    if (found.length >= 10) { nodes = found; break; }
+                    if (!nodes.length && found.length) nodes = found;
+                  }
+                  return nodes.map((el, idx) => {
+                    const title = pick(el, nameSelectors);
+                    const brand = pick(el, brandSelectors);
+                    const link  = pickLink(el, linkSelectors);
+                    const price = pick(el, priceSelectors);
+                    const orig  = pick(el, origSelectors);
+                    const pct   = pick(el, percentSelectors);
+                    return {rank: idx+1, title, brand, link, price, orig, pct};
+                  }).filter(x => x.title && x.link);
                 }
-                return '';
-              };
-              const pickLink = (el, sels) => {
-                for (const s of sels) {
-                  const a = el.querySelector(s);
-                  if (a && a.href && !a.href.startsWith('javascript')) return a.href;
-                }
-                return '';
-              };
-              const itemSelectors = [
-                'ul.tab_cont_list li','ul#bestSellerContent li','ul.best_list li',
-                'li.prod_item','ul li','div.prod_area','div.product_item','div.item'
-              ];
-              const nameSelectors = ['.product_name','.prod_name','.name','.tit','.tx_name','.item_name','a[title]'];
-              const brandSelectors = ['.brand','.brand_name','.tx_brand','.brandName'];
-              const linkSelectors  = ['a.prod_link','a.link','a.detail_link','a'];
-              const priceSelectors = ['.price .num','.sale_price','.discount_price','.final_price','.price','.value'];
-              const origSelectors  = ['.orig_price','.normal_price','.consumer','.strike','.was'];
-              const percentSelectors = ['.percent','.dc','.discount_rate','.rate'];
+            """)
+            products: List[Product] = []
+            if data and len(data) >= 10:
+                for row in data:
+                    sale = to_float(row.get("price")); orig = to_float(row.get("orig"))
+                    pct  = extract_percent_floor(orig, sale, row.get("pct"))
+                    products.append(Product(row.get("rank"), clean_text(row.get("brand")),
+                                            clean_text(row.get("title")), sale, orig, pct, row.get("link")))
+                html = page.content()
+                context.close(); browser.close()
+                return products, sniff
 
-              let nodes = [];
-              for (const s of itemSelectors) {
-                const found = Array.from(document.querySelectorAll(s));
-                if (found.length >= 10) { nodes = found; break; }
-                if (!nodes.length && found.length) nodes = found;
-              }
-              return nodes.map((el, idx) => {
-                const title = pick(el, nameSelectors);
-                const brand = pick(el, brandSelectors);
-                const link  = pickLink(el, linkSelectors);
-                const price = pick(el, priceSelectors);
-                const orig  = pick(el, origSelectors);
-                const pct   = pick(el, percentSelectors);
-                return {rank: idx+1, title, brand, link, price, orig, pct};
-              }).filter(x => x.title && x.link);
-            }
-        """)
-
-        products: List[Product] = []
-        if not data or len(data) < 10:
-            # 2차: HTML 통째로 받아 BeautifulSoup 재파싱
+            # 2차: HTML 재파싱
             html = page.content()
             products = parse_cards_from_html(html)
+            if len(products) >= 10:
+                context.close(); browser.close()
+                return products, sniff
 
-        if (not products) and data:
-            # DOM 데이터로 구성
-            for row in data:
-                sale = to_float(row.get("price"))
-                orig = to_float(row.get("orig"))
-                pct  = extract_percent_floor(orig, sale, row.get("pct"))
-                products.append(Product(
-                    rank=row.get("rank"),
-                    brand=clean_text(row.get("brand")),
-                    title=clean_text(row.get("title")),
-                    price=sale, orig_price=orig, discount_percent=pct,
-                    url=row.get("link"),
-                ))
+            # 3차: 스니핑한 JSON에서 후처리(느슨하게)
+            for blob in sniff["jsons"]:
+                try:
+                    j = json.loads(blob["body"])
+                except:
+                    continue
+                # 이름/가격/URL 후보를 넓게 탐색
+                flat = json.dumps(j, ensure_ascii=False)
+                # 링크 후보
+                urls = re.findall(r"https?://global\.oliveyoung\.com[^\s\"']+", flat)
+                names = [m for m in re.findall(r"\"(?:name|title)\"\s*:\s*\"([^\"]{3,100})\"", flat)]
+                prices = [to_float(x) for x in re.findall(r"\"(?:sale|final|price)[^\"]*\"\s*:\s*([0-9]+(?:\.[0-9]+)?)", flat)]
+                # 대략 매칭 (안정성보다 회수 우선)
+                candidates = []
+                for i, nm in enumerate(names[:60]):  # 과도 방지
+                    u = urls[i] if i < len(urls) else (urls[-1] if urls else "")
+                    pr = prices[i] if i < len(prices) else None
+                    candidates.append(Product(None, "", nm, pr, None, None, u))
+                if len(candidates) >= 10:
+                    # 순서대로 랭크 부여
+                    for idx, c in enumerate(candidates, start=1): c.rank = idx
+                    context.close(); browser.close()
+                    return candidates, sniff
 
-        # 3차(마지막): 페이지 전역 JSON 추출 시도 (Next/Nuxt 등)
-        if len(products) < 10:
-            try:
-                j = page.evaluate("() => (window.__NEXT_DATA__ || window.__NUXT__ || window.__APOLLO_STATE__ || null)")
-                if j:
-                    s = json.dumps(j)
-                    # 매우 느슨한 추출 (링크/이름/가격)
-                    candidates = re.findall(r'"(name|title)":"(.*?)".*?"(sale|price)\\w*":\\s*("?\\d+(?:\\.\\d+)?")', s)
-                    # 이 루트는 사이트 구조 파악 전 임시 백스톱. 충분치 않으면 무시.
-            except: 
-                pass
-
-        context.close(); browser.close()
-        return products
+            # 디버그 저장
+            png = page.screenshot()
+            context.close(); browser.close()
+            return [], {"jsons": sniff["jsons"], "html": html, "screenshot": base64.b64encode(png).decode()}
+    # KR 먼저(이전 대화 기준), 실패 시 US
+    items, dbg = try_once("KR", "USD", "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7")
+    if len(items) >= 10: return items
+    items, dbg2 = try_once("US", "USD", "en-US,en;q=0.9,ko-KR;q=0.6")
+    # 디버그 저장
+    ensure_dir("data/debug")
+    try:
+        if isinstance(dbg, dict):
+            if "html" in dbg and dbg["html"]:
+                with open("data/debug/page_kr.html","w",encoding="utf-8") as f: f.write(dbg["html"])
+            if "screenshot" in dbg and dbg["screenshot"]:
+                with open("data/debug/page_kr.png","wb") as f: f.write(base64.b64decode(dbg["screenshot"]))
+            for i, js in enumerate(dbg.get("jsons", [])[:5], 1):
+                with open(f"data/debug/json_kr_{i}.json","w",encoding="utf-8") as f: f.write(js.get("body",""))
+    except: pass
+    try:
+        if isinstance(dbg2, dict):
+            if "html" in dbg2 and dbg2["html"]:
+                with open("data/debug/page_us.html","w",encoding="utf-8") as f: f.write(dbg2["html"])
+            if "screenshot" in dbg2 and dbg2["screenshot"]:
+                with open("data/debug/page_us.png","wb") as f: f.write(base64.b64decode(dbg2["screenshot"]))
+            for i, js in enumerate(dbg2.get("jsons", [])[:5], 1):
+                with open(f"data/debug/json_us_{i}.json","w",encoding="utf-8") as f: f.write(js.get("body",""))
+    except: pass
+    return items  # 빈 리스트일 수 있음
 
 def fetch_products() -> List[Product]:
     # 1) HTTP
@@ -291,11 +359,11 @@ def fetch_products() -> List[Product]:
         if len(items) >= 10:
             return items
     except Exception as e:
-        print("[HTTP] 실패/부족 → Playwright:", e)
+        print("[HTTP] 실패/부족:", e)
     # 2) Playwright
     return fetch_by_playwright()
 
-# ---------- Drive / Slack / 비교 로직 (동일) ----------
+# ---------------- Drive / Slack ----------------
 from googleapiclient.discovery import build
 def build_drive_service():
     from google.oauth2 import service_account
@@ -346,10 +414,11 @@ def slack_post(text):
     if not url:
         print("[경고] SLACK_WEBHOOK_URL 미설정 → 콘솔 출력")
         print(text); return
-    r = requests.post(url, json={"text": text}, timeout=15)
+    r = requests.post(url, json={"text": text}, timeout=20)
     if r.status_code >= 300:
         print("[Slack 실패]", r.status_code, r.text)
 
+# ---------------- 비교/메시지 ----------------
 def to_dataframe(products: List[Product], date_str: str) -> pd.DataFrame:
     return pd.DataFrame([{
         "date": date_str, "rank": p.rank, "brand": p.brand, "product_name": p.title,
@@ -382,8 +451,11 @@ def build_sections(df_today, df_prev):
         dc = r.get("discount_percent"); tail = f" (↓{int(dc)}%)" if pd.notnull(dc) else ""
         S["top10"].append(f"{int(r['rank'])}. {name_link} — {price_txt}{tail}")
 
-    t30 = df_t[(df_t["rank"].notna()) & (df_t["rank"] <= 30)].copy()
-    p30 = df_p[(df_p["rank"].notna()) & (df_p["rank"] <= 30)].copy()
+    t30 = df_t[(df_t["rank"].notna()) & (df_t["rank"] <= 30)]
+    if len(t30)==0:
+        return S
+
+    p30 = df_p[(df_p["rank"].notna()) & (df_p["rank"] <= 30)]
     common = set(t30.index) & set(p30.index)
     new    = set(t30.index) - set(p30.index)
     out    = set(p30.index) - set(t30.index)
@@ -436,14 +508,12 @@ def build_slack_message(date_str, S):
     parts += S["top10"] or ["- 데이터 없음"]
     parts += ["", "*🔥 급상승*"] + (S["rising"] or ["- 해당 없음"])
     parts += ["", "*🆕 뉴랭커*"] + (S["newcomers"] or ["- 해당 없음"])
-    parts += ["", "*📉 급하락*"] + (S["falling"] or ["- 해당 없음"]) + S.get("outs", [])
+    parts += ["", "*📉 급하락*"] + (S["falling"] or ["- 해당 없음"])
+    for line in S.get("outs", []): parts.append(line)
     parts += ["", "*🔄 랭크 인&아웃*", f"{S.get('inout_count', 0)}개의 제품이 인&아웃 되었습니다."]
     return "\n".join(parts)
 
-def slack_post_or_print(msg):
-    try: slack_post(msg)
-    except Exception as e: print("[Slack 오류]", e); print(msg)
-
+# ---------------- 메인 ----------------
 def main():
     date_str = today_kst_str()
     ymd_yesterday = yesterday_kst_str()
@@ -451,50 +521,43 @@ def main():
     file_yesterday = build_filename(ymd_yesterday)
 
     print("수집 시작:", BEST_URL)
-    items = []
-    try:
-        items = fetch_by_http()
-        print("[HTTP] 수집:", len(items))
-    except Exception as e:
-        print("[HTTP 오류]", e)
-
-    if len(items) < 10:
-        print("[Playwright 폴백 진입]")
-        items = fetch_by_playwright()
+    items = fetch_products()
     print("수집 완료:", len(items))
 
+    ensure_dir("data")
     if len(items) < 10:
-        raise RuntimeError("제품 카드가 너무 적게 수집되었습니다. 셀렉터/렌더링 점검 필요")
+        # 실패 상황도 CSV는 비워서 남겨두고, Slack 알림은 보내되 종료코드는 0으로(스케줄 계속)
+        pd.DataFrame([], columns=["date","rank","brand","product_name","price","orig_price","discount_percent","url","otuk"])\
+          .to_csv(os.path.join("data", file_today), index=False, encoding="utf-8-sig")
+        slack_post("*올리브영 글로벌몰 랭킹 — 수집 실패*\n- 원인: 렌더링/지역/봇감지 이슈 가능성\n- `data/debug/` 아티팩트 확인 필요")
+        print("[경고] 10개 미만 → 디버그 저장됨(data/debug)."); return
 
     df_today = to_dataframe(items, date_str)
-    os.makedirs("data", exist_ok=True)
-    local_path = os.path.join("data", file_today)
-    df_today.to_csv(local_path, index=False, encoding="utf-8-sig")
-    print("로컬 저장:", local_path)
+    df_today.to_csv(os.path.join("data", file_today), index=False, encoding="utf-8-sig")
+    print("로컬 저장:", file_today)
 
-    drive_folder = os.getenv("GDRIVE_FOLDER_ID", "").strip()
     df_prev = None
-    if drive_folder:
+    folder = os.getenv("GDRIVE_FOLDER_ID", "").strip()
+    if folder:
         try:
             svc = build_drive_service()
-            drive_upload_csv(svc, drive_folder, file_today, df_today)
-            print("Google Drive 업로드 완료:", file_today)
-            df_prev = drive_download_csv(svc, drive_folder, file_yesterday)
-            print("전일 CSV", "성공" if df_prev is not None else "미발견", file_yesterday)
+            drive_upload_csv(svc, folder, file_today, df_today)
+            print("Drive 업로드 완료:", file_today)
+            df_prev = drive_download_csv(svc, folder, file_yesterday)
+            print("전일 CSV", "성공" if df_prev is not None else "미발견")
         except Exception as e:
-            print("Google Drive 처리 중 오류:", e); traceback.print_exc()
+            print("Drive 오류:", e); traceback.print_exc()
     else:
-        print("[경고] GDRIVE_FOLDER_ID 미설정 → 드라이브 업로드/전일 비교 생략")
+        print("[경고] GDRIVE_FOLDER_ID 미설정")
 
     S = build_sections(df_today, df_prev)
     msg = build_slack_message(date_str, S)
-    slack_post_or_print(msg)
+    slack_post(msg)
     print("Slack 전송 완료")
 
 if __name__ == "__main__":
     try: main()
     except Exception as e:
-        print("[오류 발생]", e); traceback.print_exc()
+        print("[오류]", e); traceback.print_exc()
         try: slack_post(f"*올리브영 글로벌몰 랭킹 자동화 실패*\n```\n{e}\n```")
         except: pass
-        raise
