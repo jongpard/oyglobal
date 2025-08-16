@@ -4,7 +4,7 @@
 - 소스: https://global.oliveyoung.com/display/page/best-seller?target=pillsTab1Nav1
 - HTTP(정적) → 부족 시 Playwright(동적) 폴백
 - 파일명: 올리브영글로벌_랭킹_YYYY-MM-DD.csv (KST)
-- 전일 CSV 비교 Top30 → Slack 알림
+- 전일 CSV 비교 Top30 → Slack 알림 (전일 없으면 비교 섹션 생략)
 환경변수:
   SLACK_WEBHOOK_URL
   GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN   # OAuth 권장
@@ -53,7 +53,6 @@ def fmt_currency_usd(v) -> str:
 def slack_escape(s): return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 def make_display_name(brand: str, product: str, include_brand: bool) -> str:
-    """브랜드+제품명(중복 방지). include_brand=False면 제품명만."""
     product = clean_text(product); brand = clean_text(brand)
     if not include_brand or not brand: return product
     if re.match(rf"^\[?\s*{re.escape(brand)}\b", product, flags=re.I): return product
@@ -83,7 +82,6 @@ def parse_static_html(html: str) -> List[Product]:
     cards = soup.select("#orderBestProduct > li.order-best-product")
     items: List[Product] = []
     for idx, li in enumerate(cards, start=1):
-        # 제품명: hidden input[name='prdtName']
         name = ""
         inp = li.select_one("input[name='prdtName']")
         if inp and inp.has_attr("value"): name = clean_text(inp["value"])
@@ -107,18 +105,21 @@ def parse_static_html(html: str) -> List[Product]:
             if rnum is not None: rank = int(rnum)
         if rank is None: rank = idx
 
+        # 가격: .price-info 전체 텍스트에서 US$ 금액들 추출 → sale=min, orig=max
         pbox = li.select_one(".price-info") or li
         ptxt = clean_text(pbox.get_text(" ", strip=True))
-        amts = [parse_price_to_float(m) for m in re.findall(r"(?:US\$|\$)\s*([\d.,]+)", ptxt)]
-        amts = [a for a in amts if a is not None]
+        nums = [parse_price_to_float(m) for m in re.findall(r"(?:US\$|\$)\s*([\d.,]+)", ptxt)]
+        nums = [x for x in nums if x is not None]
         sale = orig = None
-        if len(amts) == 1: sale = amts[0]
-        elif len(amts) >= 2: sale, orig = min(amts), max(amts)
+        if len(nums) == 1: sale = nums[0]
+        elif len(nums) >= 2: sale, orig = min(nums), max(nums)
 
-        sale_txt = li.select_one(".price-info strong.point")
-        orig_txt = li.select_one(".price-info span")
-        sale = sale or (parse_price_to_float(sale_txt.get_text()) if sale_txt else None)
-        orig = orig or (parse_price_to_float(orig_txt.get_text()) if orig_txt else None)
+        # 보강
+        sale_txt = li.select_one(".price-info strong.point, .price-info strong, .price-info .sale_price, .price-info .price")
+        orig_txt = li.select_one(".price-info .original_price, .price-info del, .price-info span")
+        if sale is None and sale_txt: sale = parse_price_to_float(sale_txt.get_text())
+        if orig is None and orig_txt: orig = parse_price_to_float(orig_txt.get_text())
+        if sale is None and orig is not None: sale = orig
 
         pct_txt = ""
         pct_node = li.select_one(".price-info .rate, .discount-rate, .percent, .dc")
@@ -141,7 +142,6 @@ def fetch_by_http() -> List[Product]:
     return parse_static_html(r.text)
 
 def fetch_by_playwright() -> List[Product]:
-    """동적 DOM 파싱: 카드=#orderBestProduct > li.order-best-product"""
     from playwright.sync_api import sync_playwright
     CARD_SEL = "#orderBestProduct > li.order-best-product"
     with sync_playwright() as p:
@@ -181,9 +181,22 @@ def fetch_by_playwright() -> List[Product]:
                 const link  = el.querySelector("a")?.href || '';
                 const rtxt  = get(el, ".rank-badge span, .rank_num");
                 const rank  = parseInt(rtxt) || (idx+1);
-                let sale = amt(get(el, ".price-info strong.point"));
-                let orig = amt(get(el, ".price-info span"));
-                if (sale == null && orig != null) sale = orig;   // 가격 누락 보정
+
+                // 가격: .price-info 전체 텍스트 → 모든 달러 금액 추출
+                const pbox  = el.querySelector(".price-info") || el;
+                const ptxt  = (pbox.textContent || '').replace(/\\s+/g,' ').trim();
+                const nums  = Array.from(ptxt.matchAll(/(?:US\\$|\\$)\\s*([\\d.,]+)/g))
+                                    .map(m => parseFloat(m[1].replace(/,/g,'')))
+                                    .filter(v => !isNaN(v));
+                let sale=null, orig=null;
+                if (nums.length===1){ sale=nums[0]; }
+                else if (nums.length>=2){ sale=Math.min(...nums); orig=Math.max(...nums); }
+
+                // 백업 셀렉터
+                if (sale==null) sale = amt(get(el, ".price-info strong.point, .price-info strong, .price-info .sale_price, .price-info .price"));
+                if (orig==null) orig = amt(get(el, ".price-info .original_price, .price-info del, .price-info span"));
+                if (sale==null && orig!=null) sale = orig;
+
                 const pctTxt = get(el, ".price-info .rate, .discount-rate, .percent, .dc");
                 return {rank, brand, name, link, sale, orig, pctTxt};
               }).filter(x => x.name && x.link);
@@ -257,10 +270,19 @@ def build_drive_service(mode: Optional[str] = None):
 
     if creds is None: raise RuntimeError("Google Drive 자격정보가 없습니다.")
     print(f"[Drive] auth={used}")
-    return build("drive", "v3", credentials=creds, cache_discovery=False), (used == "service_account")
+    svc = build("drive", "v3", credentials=creds, cache_discovery=False)
+
+    # 로그인 사용자 출력
+    try:
+        about = svc.about().get(fields="user(displayName,emailAddress)").execute()
+        u = about.get("user", {})
+        print(f"[Drive] user={u.get('displayName')} <{u.get('emailAddress')}>")
+    except Exception as e:
+        print("[Drive] whoami 실패:", e)
+
+    return svc, (used == "service_account")
 
 def drive_preflight(service, folder_id: str) -> bool:
-    """폴더 접근 권한/존재 확인."""
     from googleapiclient.errors import HttpError
     try:
         meta = service.files().get(
@@ -368,9 +390,8 @@ def build_sections(df_today: pd.DataFrame, df_prev: Optional[pd.DataFrame]) -> D
 
     # 전일 CSV 없으면 비교 섹션 스킵
     if df_prev is None or not len(df_prev):
-        return S  # rising/newcomers/falling/outs/inout_count=0
+        return S
 
-    # --- 이하 전일 CSV가 있을 때만 ---
     df_t = df_today.copy(); df_t["key"] = df_t["url"]; df_t.set_index("key", inplace=True)
     df_p = df_prev.copy(); df_p["key"] = df_p["url"]; df_p.set_index("key", inplace=True)
 
@@ -429,7 +450,6 @@ def build_slack_message(date_str: str, S: Dict[str, List[str]]) -> str:
              "*🔥 급상승*"] + (S["rising"] or ["- 해당 없음"]) + ["",
              "*🆕 뉴랭커*"] + (S["newcomers"] or ["- 해당 없음"]) + ["",
              "*📉 급하락*"] + (S["falling"] or ["- 해당 없음"])
-    # 급하락 섹션에 OUT도 함께 표기
     parts += S.get("outs", [])
     parts += ["", "*🔄 랭크 인&아웃*", f"{S.get('inout_count', 0)}개의 제품이 인&아웃 되었습니다."]
     return "\n".join(parts)
