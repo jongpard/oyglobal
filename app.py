@@ -5,15 +5,15 @@
 - HTTP(정적) → 부족 시 Playwright(동적) 폴백
 - 파일명: 올리브영글로벌_랭킹_YYYY-MM-DD.csv (KST)
 - 전일 CSV 비교 Top30 → Slack 알림 (전일 없으면 비교 섹션 생략)
-환경변수:
+
+필요 환경변수:
   SLACK_WEBHOOK_URL
   GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN   # OAuth
-  GDRIVE_SERVICE_ACCOUNT_JSON                                    # 선택
+  GDRIVE_SERVICE_ACCOUNT_JSON                                    # (선택)
   GDRIVE_FOLDER_ID
   DRIVE_AUTH_MODE=oauth|oauth_only|service_account               # 기본 oauth_only 권장
 """
-import os, re, io, math, json, pytz, traceback
-import datetime as dt
+import os, re, io, math, json, pytz, traceback, datetime as dt
 from dataclasses import dataclass
 from typing import List, Dict, Optional, Tuple
 
@@ -24,32 +24,26 @@ from bs4 import BeautifulSoup
 BEST_URL = "https://global.oliveyoung.com/display/page/best-seller?target=pillsTab1Nav1"
 KST = pytz.timezone("Asia/Seoul")
 
+# ---------- 시간/문자 유틸 ----------
 def now_kst(): return dt.datetime.now(KST)
 def today_kst_str(): return now_kst().strftime("%Y-%m-%d")
 def yesterday_kst_str(): return (now_kst() - dt.timedelta(days=1)).strftime("%Y-%m-%d")
 def build_filename(d): return f"올리브영글로벌_랭킹_{d}.csv"
-
 def clean_text(s): return re.sub(r"\s+", " ", (s or "")).strip()
 def to_float(s):
     if not s: return None
-    m = re.findall(r"[\d]+(?:\.[\d]+)?", str(s))
-    return float(m[0]) if m else None
-
+    m = re.findall(r"[\d]+(?:\.[\d]+)?", str(s)); return float(m[0]) if m else None
 def parse_price_to_float(text: str) -> Optional[float]:
     if not text: return None
     t = text.replace("US$", "").replace("$", "").replace(",", "").strip()
     try: return float(t)
     except: return None
-
 def fmt_currency_usd(v) -> str:
     try:
-        if v is None: return "$0.00"
-        if isinstance(v, float) and math.isnan(v): return "$0.00"
+        if v is None or (isinstance(v, float) and math.isnan(v)): return "$0.00"
         return f"${float(v):,.2f}"
-    except:
-        return "$0.00"
-
-def slack_escape(s): return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    except: return "$0.00"
+def slack_escape(s): return s.replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
 
 def make_display_name(brand: str, product: str, include_brand: bool) -> str:
     product = clean_text(product); brand = clean_text(brand)
@@ -65,6 +59,7 @@ def discount_floor(orig: Optional[float], sale: Optional[float], percent_text: O
         return max(0, int(math.floor((1 - sale / orig) * 100)))
     return None
 
+# ---------- 데이터 모델 ----------
 @dataclass
 class Product:
     rank: Optional[int]
@@ -75,10 +70,9 @@ class Product:
     discount_percent: Optional[int]
     url: str
 
-# ---------------- 정적 파서 ----------------
+# ---------- 정적 파싱 ----------
 def parse_static_html(html: str) -> List[Product]:
     soup = BeautifulSoup(html, "lxml")
-    # Global 탭 컨테이너 우선 탐색
     container = soup.select_one("#pillsTab1Nav1, [id*='pillsTab1Nav1']")
     root = container or soup
     cards = root.select("li.order-best-product")
@@ -107,7 +101,7 @@ def parse_static_html(html: str) -> List[Product]:
             if rnum is not None: rank = int(rnum)
         if rank is None: rank = idx
 
-        # 가격: .price-info 전체 텍스트에서 모든 달러 금액 추출 → sale=min, orig=max
+        # 가격: .price-info 전체 텍스트의 모든 달러 금액 → sale=min, orig=max
         pbox = li.select_one(".price-info") or li
         ptxt = clean_text(pbox.get_text(" ", strip=True))
         nums = [parse_price_to_float(m) for m in re.findall(r"(?:US\$|\$)\s*([\d.,]+)", ptxt)]
@@ -116,7 +110,7 @@ def parse_static_html(html: str) -> List[Product]:
         if len(nums) == 1: sale = nums[0]
         elif len(nums) >= 2: sale, orig = min(nums), max(nums)
 
-        # 백업 셀렉터
+        # 보강 셀렉터
         sale_txt = li.select_one(".price-info strong.point, .price-info strong, .price-info .sale_price, .price-info .price")
         orig_txt = li.select_one(".price-info .original_price, .price-info del, .price-info span")
         if sale is None and sale_txt: sale = parse_price_to_float(sale_txt.get_text())
@@ -132,86 +126,118 @@ def parse_static_html(html: str) -> List[Product]:
             items.append(Product(rank, brand, name, sale, orig, pct, link))
     return items
 
-# ---------------- HTTP → Playwright ----------------
 def fetch_by_http() -> List[Product]:
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-        "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Accept-Language": "en-US,en;q=0.9",
         "Cache-Control": "no-cache", "Pragma": "no-cache",
     }
     r = requests.get(BEST_URL, headers=headers, timeout=25)
     r.raise_for_status()
     return parse_static_html(r.text)
 
+# ---------- Playwright 파싱(강화) ----------
 def fetch_by_playwright() -> List[Product]:
+    """동적 렌더링 강제 대기 + Global 탭 고정 + 견고한 셀렉터."""
     from playwright.sync_api import sync_playwright
+    import time, pathlib
+
+    CARD_SELS = [
+        "#pillsTab1Nav1 li.order-best-product",
+        "#pillsTab1Nav1 li[class*='order-best']",
+        "#pillsTab1Nav1 li",
+    ]
+
+    def _debug_dump(page, tag="global"):
+        pathlib.Path("data/debug").mkdir(parents=True, exist_ok=True)
+        with open(f"data/debug/page_{tag}.html", "w", encoding="utf-8") as f:
+            f.write(page.content())
+        page.screenshot(path=f"data/debug/page_{tag}.png", full_page=True)
+
     with sync_playwright() as p:
         browser = p.chromium.launch(
             headless=True,
-            args=["--disable-blink-features=AutomationControlled","--no-sandbox","--disable-dev-shm-usage"]
+            args=["--disable-blink-features=AutomationControlled","--no-sandbox","--disable-dev-shm-usage"],
         )
         context = browser.new_context(
             viewport={"width":1366,"height":900},
-            locale="ko-KR", timezone_id="Asia/Seoul",
-            user_agent=("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"),
-            # ✅ country 강제 설정 제거 (미국/한국 고정 방지)
-            extra_http_headers={"Accept-Language":"ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7"},
+            locale="en-US",
+            timezone_id="Asia/Seoul",
+            user_agent=("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"),
+            extra_http_headers={"Accept-Language":"en-US,en;q=0.9"},
         )
         context.add_init_script("Object.defineProperty(navigator,'webdriver',{get:()=>undefined});")
-
         page = context.new_page()
         page.goto(BEST_URL, wait_until="domcontentloaded", timeout=60_000)
         try: page.wait_for_load_state("networkidle", timeout=30_000)
         except: pass
-
-        # ✅ Global 탭 강제 선택
-        for sel in ["[href*='pillsTab1Nav1']", "#pillsTab1Nav1-tab", "[data-bs-target='#pillsTab1Nav1']"]:
-            try:
-                page.locator(sel).first.click(timeout=1500)
-                break
-            except: pass
 
         # 배너 닫기
         for sel in ["#onetrust-accept-btn-handler","button:has-text('Accept')","button:has-text('확인')","[aria-label='Close']"]:
             try: page.locator(sel).first.click(timeout=1200)
             except: pass
 
-        for _ in range(8):
-            try: page.mouse.wheel(0,2200); page.wait_for_timeout(600)
-            except: break
+        # Global 탭 강제
+        clicked = False
+        for sel in ["[href*='pillsTab1Nav1']","#pillsTab1Nav1-tab","[data-bs-target='#pillsTab1Nav1']","button:has-text('Global')"]:
+            try: page.locator(sel).first.click(timeout=1500); clicked = True; break
+            except: pass
+        if not clicked:
+            try:
+                page.mouse.wheel(0, 1500)
+                page.locator("[href*='pillsTab1Nav1']").first.click(timeout=1500)
+            except: pass
+
+        # 컨텐츠 렌더링 폴링 (최대 30s)
+        start = time.time(); found = 0
+        while time.time() - start < 30:
+            try: page.mouse.wheel(0, 1200)
+            except: pass
+            for sel in CARD_SELS:
+                try: found = page.eval_on_selector_all(sel, "els => els.length")
+                except: found = 0
+                if found and found >= 10: break
+            if found and found >= 10: break
+            page.wait_for_timeout(700)
+
+        if not (found and found >= 10):
+            _debug_dump(page, "global_empty")
+            context.close(); browser.close()
+            return []
 
         data = page.evaluate("""
-            () => {
-              const container = document.querySelector("#pillsTab1Nav1, [id*='pillsTab1Nav1']") || document;
-              const nodes = Array.from(container.querySelectorAll("li.order-best-product"));
-              const get = (el, s) => (el.querySelector(s)?.textContent || '').replace(/\\s+/g,' ').trim();
-              const amt = t => { if(!t) return null; const v=parseFloat(t.replace(/US\\$|\\$|,/g,'').trim()); return isNaN(v)?null:v; };
-
-              return nodes.map((el, idx) => {
-                const name  = (el.querySelector("input[name='prdtName']")?.value || '').trim();
-                const brand = get(el, "dl.brand-info dt, .brand, .brand_name, .brandName");
+            (sels) => {
+              const root = document.querySelector("#pillsTab1Nav1, [id*='pillsTab1Nav1']") || document;
+              const pick = (el,s) => (el.querySelector(s)?.textContent || '').replace(/\\s+/g,' ').trim();
+              const toAmt = t => { if(!t) return null; const v=parseFloat(t.replace(/US\\$|\\$|,/g,'').trim()); return isNaN(v)?null:v; };
+              let nodes = [];
+              for (const s of sels) { nodes = Array.from(root.querySelectorAll(s)); if (nodes.length >= 10) break; }
+              return nodes.map((el, i) => {
+                const name  = (el.querySelector("input[name='prdtName']")?.value || pick(el, ".product_name, .name, .tit, .item_name"));
+                const brand = pick(el, "dl.brand-info dt, .brand, .brand_name, .brandName");
                 const link  = el.querySelector("a")?.href || '';
-                const rtxt  = get(el, ".rank-badge span, .rank_num");
-                const rank  = parseInt(rtxt) || (idx+1);
+                const rtxt  = pick(el, ".rank-badge span, .rank_num");
+                const rank  = parseInt(rtxt) || (i+1);
 
                 const pbox  = el.querySelector(".price-info") || el;
                 const ptxt  = (pbox.textContent || '').replace(/\\s+/g,' ').trim();
                 const nums  = Array.from(ptxt.matchAll(/(?:US\\$|\\$)\\s*([\\d.,]+)/g))
-                                    .map(m => parseFloat(m[1].replace(/,/g,'')))
-                                    .filter(v => !isNaN(v));
+                                   .map(m => parseFloat(m[1].replace(/,/g,'')))
+                                   .filter(v => !isNaN(v));
                 let sale=null, orig=null;
                 if (nums.length===1){ sale=nums[0]; }
                 else if (nums.length>=2){ sale=Math.min(...nums); orig=Math.max(...nums); }
 
-                if (sale==null) sale = amt(get(el, ".price-info strong.point, .price-info strong, .price-info .sale_price, .price-info .price"));
-                if (orig==null) orig = amt(get(el, ".price-info .original_price, .price-info del, .price-info span"));
+                if (sale==null) sale = toAmt(pick(el, ".price-info strong.point, .price-info strong, .price-info .sale_price, .price-info .price"));
+                if (orig==null) orig = toAmt(pick(el, ".price-info .original_price, .price-info del, .price-info span"));
                 if (sale==null && orig!=null) sale = orig;
 
-                const pctTxt = get(el, ".price-info .rate, .discount-rate, .percent, .dc");
+                const pctTxt = pick(el, ".price-info .rate, .discount-rate, .percent, .dc");
                 return {rank, brand, name, link, sale, orig, pctTxt};
               }).filter(x => x.name && x.link);
             }
-        """)
+        """, CARD_SELS)
 
         context.close(); browser.close()
 
@@ -232,7 +258,7 @@ def fetch_products() -> List[Product]:
         print("[HTTP 오류] → Playwright 폴백:", e)
     return fetch_by_playwright()
 
-# ---------------- Google Drive ----------------
+# ---------- Google Drive ----------
 def build_drive_service(mode: Optional[str] = None):
     """
     mode:
@@ -253,7 +279,7 @@ def build_drive_service(mode: Optional[str] = None):
 
     def make_oauth():
         if not (cid and csec and rtk): return None
-        # ✅ scopes 미전달 → 기존 refresh token의 스코프 그대로 사용 (invalid_scope 방지)
+        # scopes 미전달 → 기존 refresh token의 스코프 그대로 사용 (invalid_scope 방지)
         return Credentials(None, refresh_token=rtk, token_uri="https://oauth2.googleapis.com/token",
                            client_id=cid, client_secret=csec)
 
@@ -262,7 +288,7 @@ def build_drive_service(mode: Optional[str] = None):
         info = json.loads(sa_json)
         return gsa.Credentials.from_service_account_info(info, scopes=["https://www.googleapis.com/auth/drive"])
 
-    used = None; creds = None
+    creds = None; used = None
     if mode in ("oauth", "oauth_only"):
         creds = make_oauth(); used = "oauth" if creds else None
         if not creds and mode == "oauth_only":
@@ -275,7 +301,8 @@ def build_drive_service(mode: Optional[str] = None):
     print(f"[Drive] auth={used}")
     try:
         about = svc.about().get(fields="user(displayName,emailAddress)").execute()
-        print(f"[Drive] user={about.get('user',{}).get('displayName')} <{about.get('user',{}).get('emailAddress')}>")
+        u = about.get("user", {})
+        print(f"[Drive] user={u.get('displayName')} <{u.get('emailAddress')}>")
     except Exception as e:
         print("[Drive] whoami 실패:", e)
     return svc, (used == "service_account")
@@ -284,8 +311,7 @@ def drive_preflight(service, folder_id: str) -> bool:
     from googleapiclient.errors import HttpError
     try:
         meta = service.files().get(
-            fileId=folder_id,
-            fields="id,name,driveId",
+            fileId=folder_id, fields="id,name,driveId",
             supportsAllDrives=True,
         ).execute()
         print(f"[Drive] folder OK: name='{meta.get('name')}', driveId='{meta.get('driveId','MyDrive')}'")
@@ -338,7 +364,7 @@ def drive_download_csv(service, folder_id: str, name: str) -> Optional[pd.DataFr
     while not done: _, done = dl.next_chunk()
     fh.seek(0); return pd.read_csv(fh)
 
-# ---------------- Slack ----------------
+# ---------- Slack ----------
 def slack_post(text: str):
     url = os.getenv("SLACK_WEBHOOK_URL")
     if not url:
@@ -347,7 +373,7 @@ def slack_post(text: str):
     if r.status_code >= 300:
         print("[Slack 실패]", r.status_code, r.text)
 
-# ---------------- 비교/메시지 ----------------
+# ---------- 비교/메시지 ----------
 def to_dataframe(products: List[Product], date_str: str) -> pd.DataFrame:
     return pd.DataFrame([{
         "date": date_str,
@@ -399,7 +425,6 @@ def build_sections(df_today: pd.DataFrame, df_prev: Optional[pd.DataFrame]) -> D
         disp = make_display_name(row.get("brand",""), row.get("product_name",""), include_brand=True)
         return f"<{row['url']}|{slack_escape(disp)}>"
 
-    # 🔥 급상승
     rising = []
     for k in common:
         prev_rank = int(p30.loc[k,"rank"]); curr_rank = int(t30.loc[k,"rank"])
@@ -410,7 +435,6 @@ def build_sections(df_today: pd.DataFrame, df_prev: Optional[pd.DataFrame]) -> D
     rising.sort(key=lambda x: (-x[0], x[1], x[2], x[3]))
     S["rising"] = [e[-1] for e in rising[:3]]
 
-    # 🆕 뉴랭커
     newcomers = []
     for k in new:
         curr_rank = int(t30.loc[k,"rank"])
@@ -418,7 +442,6 @@ def build_sections(df_today: pd.DataFrame, df_prev: Optional[pd.DataFrame]) -> D
     newcomers.sort(key=lambda x: x[0])
     S["newcomers"] = [line for _, line in newcomers[:3]]
 
-    # 📉 급하락
     falling = []
     for k in common:
         prev_rank = int(p30.loc[k,"rank"]); curr_rank = int(t30.loc[k,"rank"])
@@ -429,7 +452,6 @@ def build_sections(df_today: pd.DataFrame, df_prev: Optional[pd.DataFrame]) -> D
     falling.sort(key=lambda x: (-x[0], x[1], x[2], x[3]))
     S["falling"] = [e[-1] for e in falling[:5]]
 
-    # OUT
     for k in sorted(list(out)):
         prev_rank = int(p30.loc[k,"rank"])
         line,_ = line_move(full_name_link(p30.loc[k]), prev_rank, None)
@@ -448,7 +470,7 @@ def build_slack_message(date_str: str, S: Dict[str, List[str]]) -> str:
     parts += ["", "*🔄 랭크 인&아웃*", f"{S.get('inout_count', 0)}개의 제품이 인&아웃 되었습니다."]
     return "\n".join(parts)
 
-# ---------------- 메인 ----------------
+# ---------- 메인 ----------
 def main():
     date_str = today_kst_str()
     ymd_yesterday = yesterday_kst_str()
@@ -456,10 +478,9 @@ def main():
     file_yesterday = build_filename(ymd_yesterday)
 
     print("수집 시작:", BEST_URL)
-    items = []
+    items: List[Product] = []
     try:
-        items = fetch_by_http()
-        print(f"[HTTP] 수집: {len(items)}개")
+        items = fetch_by_http(); print(f"[HTTP] 수집: {len(items)}개")
     except Exception as e:
         print("[HTTP 오류]", e)
     if len(items) < 10:
@@ -480,7 +501,6 @@ def main():
         try:
             prefer = os.getenv("DRIVE_AUTH_MODE","oauth_only").lower()
             svc, is_sa = build_drive_service(prefer)
-
             if not drive_preflight(svc, folder):
                 if is_sa:
                     print("[Drive] SA → OAuth-only 재시도")
