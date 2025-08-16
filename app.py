@@ -1,26 +1,13 @@
 # -*- coding: utf-8 -*-
 """
 올리브영 글로벌몰 베스트셀러 랭킹 수집/비교/알림 (USD)
-- 데이터 소스: https://global.oliveyoung.com/display/page/best-seller?target=pillsTab1Nav1
-- HTTP 우선 → 결과 부족 시 Playwright 폴백
-- 저장 파일명: 올리브영글로벌_랭킹_YYYY-MM-DD.csv (KST 기준)
-- 전일 CSV와 비교하여 TOP10/급상승/뉴랭커/급하락(OUT 포함)/랭크 인&아웃 계산
-- Slack 메시지: 국내 버전과 동일한 구조/포맷(모든 제목/소제목 굵게)
-- Google Drive 업로드/전일 파일 조회 (서비스계정 or OAuth RefreshToken 모두 지원)
-- 환경변수:
-  SLACK_WEBHOOK_URL
-  GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN (OAuth 사용 시)
-  GDRIVE_FOLDER_ID
-  GDRIVE_SERVICE_ACCOUNT_JSON (서비스계정 JSON 문자열; 있으면 이걸 우선 사용)
 """
 import os
 import re
 import io
 import math
 import json
-import time
 import pytz
-import uuid
 import traceback
 import datetime as dt
 from dataclasses import dataclass
@@ -30,11 +17,9 @@ import requests
 import pandas as pd
 from bs4 import BeautifulSoup
 
-# ==== 환경 상수 ====
 BEST_URL = "https://global.oliveyoung.com/display/page/best-seller?target=pillsTab1Nav1"
 KST = pytz.timezone("Asia/Seoul")
 
-# ==== 유틸 ====
 def now_kst() -> dt.datetime:
     return dt.datetime.now(KST)
 
@@ -60,32 +45,23 @@ def to_float(s: Optional[str]) -> Optional[float]:
         return None
 
 def extract_percent_floor(orig_price: Optional[float], sale_price: Optional[float], percent_text: Optional[str]) -> Optional[int]:
-    """
-    우선순위:
-      1) percent_text에서 숫자 추출해 내림
-      2) 원가/판매가가 있으면 계산해 내림
-    """
-    # 1) 직접 표기된 퍼센트
     if percent_text:
         n = to_float(percent_text)
         if n is not None:
-            return int(math.floor(n))
-    # 2) 가격으로 계산
+            return int(n // 1)
     if orig_price and sale_price and orig_price > 0:
         pct = (1 - (sale_price / orig_price)) * 100.0
-        return max(0, int(math.floor(pct)))
+        return max(0, int(pct // 1))
     return None
 
 def clean_text(s: Optional[str]) -> str:
     return re.sub(r"\s+", " ", (s or "")).strip()
 
 def remove_brand_from_title(title: str, brand: str) -> str:
-    """TOP10 표시에 브랜드 제거 (국내 버전 규칙 동일)"""
     t = clean_text(title)
     b = clean_text(brand)
     if not b:
         return t
-    # [브랜드] 제품명 / 브랜드 제품명 / (브랜드) 제품명 등 선두부 제거
     patterns = [
         rf"^\[?\s*{re.escape(b)}\s*\]?\s*[-–—:|]*\s*",
         rf"^\(?\s*{re.escape(b)}\s*\)?\s*[-–—:|]*\s*",
@@ -98,7 +74,6 @@ def remove_brand_from_title(title: str, brand: str) -> str:
     return t
 
 def slack_escape(s: str) -> str:
-    # Slack의 링크 텍스트에는 &, <, > 이슈만 간단히 처리
     return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 def fmt_currency_usd(v: Optional[float]) -> str:
@@ -108,22 +83,16 @@ def fmt_currency_usd(v: Optional[float]) -> str:
 
 @dataclass
 class Product:
-    rank: Optional[int]             # 1-based
+    rank: Optional[int]
     brand: str
     title: str
-    price: Optional[float]          # 판매가(할인가)
-    orig_price: Optional[float]     # 정상가(있으면)
-    discount_percent: Optional[int] # 소수점 없이 버림
+    price: Optional[float]
+    orig_price: Optional[float]
+    discount_percent: Optional[int]
     url: str
 
 def parse_cards_from_html(html: str) -> List[Product]:
-    """
-    HTTP 응답의 HTML에서 최대한 파싱 (전면 JS일 수도 있으므로 실패 가능)
-    다양한 클래스/구조를 포괄적으로 시도
-    """
     soup = BeautifulSoup(html, "lxml")
-
-    # 후보 셀렉터들 (상황 변화 대응)
     item_selectors = [
         "ul.tab_cont_list li",
         "ul.best_list li",
@@ -132,7 +101,6 @@ def parse_cards_from_html(html: str) -> List[Product]:
         "ul li",
         "div.prod_area",
     ]
-
     name_selectors = [".product_name", ".prod_name", ".name", ".tit", ".tx_name", ".item_name", "a[title]"]
     brand_selectors = [".brand", ".brand_name", ".tx_brand", ".brandName"]
     link_selectors = ["a", "a.prod_link", "a.link", "a.detail_link"]
@@ -165,7 +133,6 @@ def parse_cards_from_html(html: str) -> List[Product]:
         if found and len(found) >= 10:
             break
 
-    # 순위는 DOM 순서로 매기되, 카드가 부족하면 빈 리스트 유지 (폴백 유도)
     for idx, li in enumerate(found, start=1):
         title = pick_text(li, name_selectors)
         brand = pick_text(li, brand_selectors)
@@ -178,7 +145,6 @@ def parse_cards_from_html(html: str) -> List[Product]:
         orig = to_float(orig_txt)
         pct = extract_percent_floor(orig, sale, pct_txt)
 
-        # 상대경로 보정
         if link and link.startswith("/"):
             link = "https://global.oliveyoung.com" + link
 
@@ -192,30 +158,20 @@ def parse_cards_from_html(html: str) -> List[Product]:
                 discount_percent=pct,
                 url=link
             ))
-
     return items
 
 def fetch_by_http() -> List[Product]:
     hdrs = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/120.0.0.0 Safari/537.36"
-        ),
-        # 미국 사용자로 위장
+        "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"),
         "Accept-Language": "en-US,en;q=0.9",
         "Cache-Control": "no-cache",
         "Pragma": "no-cache",
     }
-    r = requests.get(BEST_URL, headers=hdrs, timeout=20)
+    r = requests.get(BEST_URL, headers=hdrs, timeout=25)
     r.raise_for_status()
     return parse_cards_from_html(r.text)
 
 def fetch_by_playwright() -> List[Product]:
-    """
-    Playwright 폴백. 다양한 셀렉터 조합을 사용하여 카드 요소를 수집.
-    - locale='en-US', timezone='America/Los_Angeles' 로 글로벌몰/달러 유도
-    """
     from playwright.sync_api import sync_playwright
 
     with sync_playwright() as p:
@@ -223,39 +179,39 @@ def fetch_by_playwright() -> List[Product]:
         context = browser.new_context(
             locale="en-US",
             timezone_id="America/Los_Angeles",
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/120.0.0.0 Safari/537.36"
-            ),
+            user_agent=("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"),
         )
         page = context.new_page()
-        page.goto(BEST_URL, wait_until="networkidle", timeout=60_000)
+        page.goto(BEST_URL, wait_until="domcontentloaded", timeout=60_000)
+        # 네트워크 안정화
+        try:
+            page.wait_for_load_state("networkidle", timeout=30_000)
+        except:
+            pass
 
-        # 동적 로드 대기: 여러 후보 셀렉터 중 하나가 나타나면 OK
-        candidates = [
-            "ul.tab_cont_list li",
-            "ul#bestSellerContent li",
-            "ul.best_list li",
-            "div.best_seller_wrap li",
-            "li .product_name",
-        ]
-
-        success = False
-        for sel in candidates:
+        # 쿠키/동의/배너 닫기 (여러 후보)
+        for sel in [
+            "button#onetrust-accept-btn-handler",
+            "button:has-text('Accept All')",
+            "button:has-text('Accept')",
+            "button:has-text('동의')",
+            "button:has-text('확인')",
+            "button[aria-label='Close']",
+        ]:
             try:
-                page.wait_for_selector(sel, timeout=30_000)
-                success = True
-                break
+                page.locator(sel).first.click(timeout=1500)
             except:
                 pass
-        if not success:
-            # 한 번 더 스크롤 유도
-            page.evaluate("() => window.scrollTo(0, document.body.scrollHeight)")
-            page.wait_for_timeout(1500)
-            page.wait_for_selector(candidates[-1], timeout=30_000)
 
-        # 브라우저 내에서 넓게 긁어오기 (다양한 클래스 대응)
+        # 자동 스크롤로 지연로딩 유도
+        try:
+            for _ in range(8):
+                page.mouse.wheel(0, 2200)
+                page.wait_for_timeout(900)
+        except:
+            pass
+
+        # 넓은 셀렉터로 수집 (보임 여부 무시)
         data = page.evaluate(
             """
             () => {
@@ -263,7 +219,7 @@ def fetch_by_playwright() -> List[Product]:
                 for (const s of sels) {
                   const x = el.querySelector(s);
                   if (x) {
-                    const t = (x.textContent || '').trim();
+                    const t = (x.textContent || '').replace(/\\s+/g,' ').trim();
                     if (t) return t;
                   }
                 }
@@ -272,7 +228,7 @@ def fetch_by_playwright() -> List[Product]:
               const pickLink = (el, sels) => {
                 for (const s of sels) {
                   const a = el.querySelector(s);
-                  if (a && a.href) return a.href;
+                  if (a && a.href && !a.href.startsWith('javascript')) return a.href;
                 }
                 return '';
               };
@@ -295,7 +251,7 @@ def fetch_by_playwright() -> List[Product]:
               for (const s of itemSelectors) {
                 const found = Array.from(document.querySelectorAll(s));
                 if (found.length >= 10) { nodes = found; break; }
-                if (!nodes.length) nodes = found;
+                if (!nodes.length && found.length) nodes = found;
               }
               return nodes.map((el, idx) => {
                 const title = pick(el, nameSelectors);
@@ -309,55 +265,53 @@ def fetch_by_playwright() -> List[Product]:
             }
             """
         )
+
+        # 폴백: JS 평가로도 10개 미만이면 HTML을 통째로 파싱
+        products: List[Product] = []
+        if not data or len(data) < 10:
+            html = page.content()
+            context.close()
+            browser.close()
+            return parse_cards_from_html(html)
+
+        for row in data:
+            sale = to_float(row.get("price"))
+            orig = to_float(row.get("orig"))
+            pct = extract_percent_floor(orig, sale, row.get("pct"))
+            products.append(Product(
+                rank=row.get("rank"),
+                brand=clean_text(row.get("brand")),
+                title=clean_text(row.get("title")),
+                price=sale,
+                orig_price=orig,
+                discount_percent=pct,
+                url=row.get("link"),
+            ))
+
         context.close()
         browser.close()
-
-    products: List[Product] = []
-    for row in data:
-        sale = to_float(row.get("price"))
-        orig = to_float(row.get("orig"))
-        pct = extract_percent_floor(orig, sale, row.get("pct"))
-
-        products.append(Product(
-            rank=row.get("rank"),
-            brand=clean_text(row.get("brand")),
-            title=clean_text(row.get("title")),
-            price=sale,
-            orig_price=orig,
-            discount_percent=pct,
-            url=row.get("link"),
-        ))
-    return products
+        return products
 
 def fetch_products() -> List[Product]:
-    # 1) HTTP 시도
     try:
         items = fetch_by_http()
-        if len(items) >= 20:
+        if len(items) >= 10:   # 완화 (기존 20 → 10)
             return items
     except Exception as e:
         print("[HTTP] 실패/부족 → Playwright 폴백:", e)
+    return fetch_by_playwright()
 
-    # 2) Playwright 폴백
-    items = fetch_by_playwright()
-    return items
-
-# ==== Google Drive ====
+# ---------------- Google Drive / Slack / 계산 로직 (변경 없음) ----------------
+from googleapiclient.discovery import build
 def build_drive_service():
-    from googleapiclient.discovery import build
     from google.oauth2 import service_account
     from google.oauth2.credentials import Credentials
-
     sa_json = os.getenv("GDRIVE_SERVICE_ACCOUNT_JSON", "").strip()
     scopes = ["https://www.googleapis.com/auth/drive"]
-    creds = None
-
     if sa_json:
-        # 서비스계정 우선
         info = json.loads(sa_json)
         creds = service_account.Credentials.from_service_account_info(info, scopes=scopes)
     else:
-        # OAuth Refresh Token
         client_id = os.getenv("GOOGLE_CLIENT_ID")
         client_secret = os.getenv("GOOGLE_CLIENT_SECRET")
         refresh_token = os.getenv("GOOGLE_REFRESH_TOKEN")
@@ -375,16 +329,12 @@ def build_drive_service():
 
 def drive_upload_csv(service, folder_id: str, name: str, df: pd.DataFrame) -> str:
     from googleapiclient.http import MediaIoBaseUpload
-
-    # 같은 이름이 있으면 업데이트, 없으면 생성
     q = f"name = '{name}' and '{folder_id}' in parents and trashed = false"
     res = service.files().list(q=q, fields="files(id, name)").execute()
     file_id = res.get("files", [{}])[0].get("id") if res.get("files") else None
-
     buf = io.BytesIO()
     df.to_csv(buf, index=False, encoding="utf-8-sig")
     buf.seek(0)
-
     media = MediaIoBaseUpload(buf, mimetype="text/csv", resumable=False)
     if file_id:
         service.files().update(fileId=file_id, media_body=media).execute()
@@ -401,30 +351,26 @@ def drive_download_csv(service, folder_id: str, name: str) -> Optional[pd.DataFr
     if not files:
         return None
     file_id = files[0]["id"]
-
     req = service.files().get_media(fileId=file_id)
     fh = io.BytesIO()
     from googleapiclient.http import MediaIoBaseDownload
     downloader = MediaIoBaseDownload(fh, req)
     done = False
     while not done:
-        status, done = downloader.next_chunk()
-
+        _, done = downloader.next_chunk()
     fh.seek(0)
     return pd.read_csv(fh)
 
-# ==== Slack ====
 def slack_post(text: str):
     url = os.getenv("SLACK_WEBHOOK_URL")
     if not url:
-        print("[경고] SLACK_WEBHOOK_URL이 설정되지 않았습니다. 메시지를 출력으로 대체합니다.")
+        print("[경고] SLACK_WEBHOOK_URL 미설정 → 콘솔 출력 대체")
         print(text)
         return
     r = requests.post(url, json={"text": text}, timeout=15)
     if r.status_code >= 300:
         print("[Slack 실패]", r.status_code, r.text)
 
-# ==== 비교/섹션 계산 ====
 def to_dataframe(products: List[Product], date_str: str) -> pd.DataFrame:
     rows = []
     for p in products:
@@ -433,25 +379,21 @@ def to_dataframe(products: List[Product], date_str: str) -> pd.DataFrame:
             "rank": p.rank,
             "brand": p.brand,
             "product_name": p.title,
-            "price": p.price,                 # 숫자 (달러)
-            "orig_price": p.orig_price,       # 숫자
-            "discount_percent": p.discount_percent,  # 정수(버림)
+            "price": p.price,
+            "orig_price": p.orig_price,
+            "discount_percent": p.discount_percent,
             "url": p.url,
-            "otuk": False if p.rank is not None else True,  # 국내 버전과 동일한 컬럼 유지
+            "otuk": False if p.rank is not None else True,
         })
     return pd.DataFrame(rows)
 
 def line_move(name_link: str, prev_rank: Optional[int], curr_rank: Optional[int]) -> Tuple[str, int]:
-    """
-    포맷 라인과 이동폭(절대값) 반환
-    """
     if prev_rank is None and curr_rank is not None:
         return f"- {name_link} NEW → {curr_rank}위", 99999
     if curr_rank is None and prev_rank is not None:
         return f"- {name_link} {prev_rank}위 → OUT", 99999
     if prev_rank is None or curr_rank is None:
         return f"- {name_link}", 0
-
     delta = prev_rank - curr_rank
     if delta > 0:
         return f"- {name_link} {prev_rank}위 → {curr_rank}위 (↑{delta})", delta
@@ -461,16 +403,10 @@ def line_move(name_link: str, prev_rank: Optional[int], curr_rank: Optional[int]
         return f"- {name_link} {prev_rank}위 → {curr_rank}위 (변동없음)", 0
 
 def build_sections(df_today: pd.DataFrame, df_prev: Optional[pd.DataFrame]) -> Dict[str, List[str]]:
-    """
-    섹션별 라인 문자열 리스트 생성
-    """
     sections = {"top10": [], "rising": [], "newcomers": [], "falling": [], "outs": [], "inout_count": 0}
-
-    # 정렬/키
     df_t = df_today.copy()
-    df_t["key"] = df_t["url"]  # 고유키로 링크 사용 (국내 버전과 동일 전략)
+    df_t["key"] = df_t["url"]
     df_t.set_index("key", inplace=True)
-
     if df_prev is not None and len(df_prev):
         df_p = df_prev.copy()
         df_p["key"] = df_p["url"]
@@ -478,7 +414,6 @@ def build_sections(df_today: pd.DataFrame, df_prev: Optional[pd.DataFrame]) -> D
     else:
         df_p = pd.DataFrame(columns=df_t.columns)
 
-    # ---- TOP 10 ----
     top10 = df_t.dropna(subset=["rank"]).sort_values("rank").head(10)
     for _, r in top10.iterrows():
         name_only = remove_brand_from_title(r["product_name"], r.get("brand", ""))
@@ -488,17 +423,12 @@ def build_sections(df_today: pd.DataFrame, df_prev: Optional[pd.DataFrame]) -> D
         tail = f" (↓{int(dc)}%)" if pd.notnull(dc) else ""
         sections["top10"].append(f"{int(r['rank'])}. {name_link} — {price_txt}{tail}")
 
-    # ---- 집합/랭크 정보 준비 ----
-    # Top30만 비교 대상
     t30 = df_t[(df_t["rank"].notna()) & (df_t["rank"] <= 30)].copy()
     p30 = df_p[(df_p["rank"].notna()) & (df_p["rank"] <= 30)].copy()
-
-    # 공통 / 신규 / 아웃 판별
     common_keys = set(t30.index).intersection(set(p30.index))
-    new_keys = set(t30.index) - set(p30.index)  # 전일 Top30 밖 → 오늘 Top30
-    out_keys = set(p30.index) - set(t30.index)  # 전일 Top30 → 오늘 Top30 밖(or 미등장)
+    new_keys = set(t30.index) - set(p30.index)
+    out_keys = set(p30.index) - set(t30.index)
 
-    # ---- 급상승 (공통 중 개선폭 > 0, 상위 3) ----
     rising_candidates = []
     for k in common_keys:
         prev_rank = int(p30.loc[k, "rank"])
@@ -509,12 +439,10 @@ def build_sections(df_today: pd.DataFrame, df_prev: Optional[pd.DataFrame]) -> D
             name_link = f"<{t30.loc[k, 'url']}|{slack_escape(name_only)}>"
             line, _ = line_move(name_link, prev_rank, curr_rank)
             rising_candidates.append((imp, curr_rank, prev_rank, slack_escape(name_only), line))
-    # 정렬: 개선폭 desc → 오늘순위 asc → 전일순위 asc → 제품명 가나다
     rising_candidates.sort(key=lambda x: (-x[0], x[1], x[2], x[3]))
     for entry in rising_candidates[:3]:
         sections["rising"].append(entry[-1])
 
-    # ---- 뉴랭커 (전일 Top30 밖 → 오늘 Top30 진입), 오늘순위 asc, 최대 3 ----
     newcomers = []
     for k in new_keys:
         curr_rank = int(t30.loc[k, "rank"])
@@ -525,7 +453,6 @@ def build_sections(df_today: pd.DataFrame, df_prev: Optional[pd.DataFrame]) -> D
     for _, line in newcomers[:3]:
         sections["newcomers"].append(line)
 
-    # ---- 급하락 (공통 중 하락폭 > 0, 내림차순 상위 5) + OUT 같이 표기 ----
     falling_candidates = []
     for k in common_keys:
         prev_rank = int(p30.loc[k, "rank"])
@@ -540,7 +467,6 @@ def build_sections(df_today: pd.DataFrame, df_prev: Optional[pd.DataFrame]) -> D
     for entry in falling_candidates[:5]:
         sections["falling"].append(entry[-1])
 
-    # OUT (전일 Top30 → 오늘 Top30 밖)
     for k in sorted(list(out_keys)):
         prev_rank = int(p30.loc[k, "rank"])
         name_only = remove_brand_from_title(p30.loc[k, "product_name"], p30.loc[k].get("brand", ""))
@@ -548,7 +474,6 @@ def build_sections(df_today: pd.DataFrame, df_prev: Optional[pd.DataFrame]) -> D
         line, _ = line_move(name_link, prev_rank, None)
         sections["outs"].append(line)
 
-    # ---- 랭크 인&아웃 개수 ----
     sections["inout_count"] = len(new_keys) + len(out_keys)
     return sections
 
@@ -556,46 +481,30 @@ def build_slack_message(date_str: str, sections: Dict[str, List[str]]) -> str:
     parts = []
     parts.append(f"*올리브영 글로벌몰 랭킹 — {date_str}*")
     parts.append("")
-    # TOP 10
     parts.append("*TOP 10*")
-    if sections["top10"]:
-        parts += [f"{line}" for line in sections["top10"]]
-    else:
-        parts.append("- 데이터 없음")
-
-    # 급상승
+    parts += sections["top10"] or ["- 데이터 없음"]
     parts.append("")
     parts.append("*🔥 급상승*")
-    if sections["rising"]:
-        parts += sections["rising"]
-    else:
-        parts.append("- 해당 없음")
-
-    # 뉴랭커
+    parts += sections["rising"] or ["- 해당 없음"]
     parts.append("")
     parts.append("*🆕 뉴랭커*")
-    if sections["newcomers"]:
-        parts += sections["newcomers"]
-    else:
-        parts.append("- 해당 없음")
-
-    # 급하락 (5개) + OUT
+    parts += sections["newcomers"] or ["- 해당 없음"]
     parts.append("")
     parts.append("*📉 급하락*")
-    if sections["falling"]:
-        parts += sections["falling"]
-    else:
-        parts.append("- 해당 없음")
-    # OUT 함께 표기
+    parts += sections["falling"] or ["- 해당 없음"]
     for line in sections.get("outs", []):
         parts.append(line)
-
-    # 랭크 인&아웃
     parts.append("")
     parts.append("*🔄 랭크 인&아웃*")
     parts.append(f"{sections.get('inout_count', 0)}개의 제품이 인&아웃 되었습니다.")
-
     return "\n".join(parts)
+
+def slack_post_or_print(msg: str):
+    try:
+        slack_post(msg)
+    except Exception as e:
+        print("[Slack 오류]", e)
+        print(msg)
 
 def main():
     date_str = today_kst_str()
@@ -606,19 +515,16 @@ def main():
     print("수집 시작:", BEST_URL)
     products = fetch_products()
     print(f"수집 완료: {len(products)}개")
-
     if len(products) < 10:
-        raise RuntimeError("제품 카드가 너무 적게 수집되었습니다. 셀렉터 점검 필요")
+        raise RuntimeError("제품 카드가 너무 적게 수집되었습니다. 셀렉터/렌더링 점검 필요")
 
     df_today = to_dataframe(products, date_str)
 
-    # CSV 로컬 저장 (워크플로 로그 확인용)
     os.makedirs("data", exist_ok=True)
     local_path = os.path.join("data", file_today)
     df_today.to_csv(local_path, index=False, encoding="utf-8-sig")
     print("로컬 저장:", local_path)
 
-    # Google Drive 업로드 및 전일 파일 다운로드
     drive_folder = os.getenv("GDRIVE_FOLDER_ID", "").strip()
     df_prev = None
     if drive_folder:
@@ -626,12 +532,8 @@ def main():
             svc = build_drive_service()
             drive_upload_csv(svc, drive_folder, file_today, df_today)
             print("Google Drive 업로드 완료:", file_today)
-
             df_prev = drive_download_csv(svc, drive_folder, file_yesterday)
-            if df_prev is not None:
-                print("전일 CSV 다운로드 성공:", file_yesterday)
-            else:
-                print("전일 CSV 미발견:", file_yesterday)
+            print("전일 CSV", "다운로드 성공" if df_prev is not None else "미발견:", file_yesterday)
         except Exception as e:
             print("Google Drive 처리 중 오류:", e)
             traceback.print_exc()
@@ -640,8 +542,7 @@ def main():
 
     sections = build_sections(df_today, df_prev)
     message = build_slack_message(date_str, sections)
-
-    slack_post(message)
+    slack_post_or_print(message)
     print("Slack 전송 완료")
 
 if __name__ == "__main__":
@@ -650,7 +551,6 @@ if __name__ == "__main__":
     except Exception as e:
         print("[오류 발생]", e)
         traceback.print_exc()
-        # 실패 시에도 Slack에 간단히 알림 (선택)
         try:
             slack_post(f"*올리브영 글로벌몰 랭킹 자동화 실패*\n```\n{e}\n```")
         except:
