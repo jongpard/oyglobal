@@ -3,7 +3,7 @@ name: OliveYoung Global Ranking
 on:
   workflow_dispatch: {}
   schedule:
-    - cron: "10 0 * * *"   # 매일 09:10 KST (UTC+0 기준)
+    - cron: "10 0 * * *"   # 매일 09:10 KST (UTC 기준 00:10)
 
 jobs:
   run:
@@ -15,6 +15,7 @@ jobs:
       GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
       GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
       GDRIVE_SERVICE_ACCOUNT_JSON: ${{ secrets.GDRIVE_SERVICE_ACCOUNT_JSON }}
+      DRIVE_AUTH_MODE: "oauth"   # ✅ OAuth 우선 사용(개인계정 토큰)
 
     steps:
       - name: Checkout
