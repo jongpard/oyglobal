@@ -412,7 +412,7 @@ def build_slack_message(date_str: str, S: Dict[str, List[str]]) -> str:
              "*TOP 10*"] + (S["top10"] or ["- 데이터 없음"]) + ["",
              "*🔥 급상승*"] + (S["rising"] or ["- 해당 없음"]) + ["",
              "*🆕 뉴랭커*"] + (S["newcomers"] or ["- 해당 없음"]) + ["",
-             "*📉 급하락*"] + (S["falling"] or ["- 해당 없음"])]
+             "*📉 급하락*"] + (S["falling"] or ["- 해당 없음"])
     # 급하락 섹션 안에 OUT도 같이 표기
     parts += S.get("outs", [])
     parts += ["", "*🔄 랭크 인&아웃*", f"{S.get('inout_count', 0)}개의 제품이 인&아웃 되었습니다."]
