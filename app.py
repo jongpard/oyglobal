@@ -461,7 +461,7 @@ def build_sections(df_today: pd.DataFrame, df_prev: Optional[pd.DataFrame]) -> D
 
 def build_slack_message(date_str: str, S: Dict[str, List[str]]) -> str:
     lines: List[str] = []
-    lines.append(f"*올리브영 글로벌몰 랭킹 — {date_str}*")
+    lines.append(f"*올리브영 글로벌 전체 랭킹 — {date_str}*")
     lines.append("")
     lines.append("*TOP 10*");          lines.extend(S.get("top10") or ["- 데이터 없음"]); lines.append("")
     lines.append("*🔥 급상승*");       lines.extend(S.get("rising") or ["- 해당 없음"]); lines.append("")
