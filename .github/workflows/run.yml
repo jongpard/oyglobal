@@ -1,4 +1,4 @@
-name: OliveYoung Global Ranking
+name: OliveYoung Ranking Scraper
 
 on:
   workflow_dispatch: {}
@@ -6,40 +6,35 @@ on:
     - cron: "10 0 * * *"   # 매일 09:10 KST (UTC 00:10)
 
 jobs:
-  run:
+  build:
     runs-on: ubuntu-latest
-    env:
-      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-      GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
-      GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
-      GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
-      GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
-      DRIVE_AUTH_MODE: "oauth_only"  # but 코드에서 OAuth 단일 경로로 처리
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - name: Checkout repo
+        uses: actions/checkout@v3
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v4
         with:
-          python-version: "3.10"
+          python-version: '3.10'
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install requests pandas beautifulsoup4 lxml pytz \
-                     google-api-python-client google-auth google-auth-oauthlib playwright
-          python -m playwright install --with-deps chromium
+          pip install -r requirements.txt
 
-      - name: Run script
+      - name: Print current time (UTC & KST)
+        run: |
+          echo "=== UTC Time ==="
+          date -u
+          echo "=== KST Time ==="
+          TZ=Asia/Seoul date
+
+      - name: Run scraper
         run: python app.py
 
-      - name: Upload CSV artifact (optional)
-        if: always()
-        uses: actions/upload-artifact@v4
+      - name: Upload artifact
+        uses: actions/upload-artifact@v3
         with:
-          name: csv-${{ github.run_id }}
-          path: |
-            data/*.csv
-            data/debug/*
+          name: oliveyoung_ranking
+          path: output/*.csv
