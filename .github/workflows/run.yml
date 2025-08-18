@@ -3,7 +3,7 @@ name: OliveYoung Global Ranking
 on:
   workflow_dispatch: {}
   schedule:
-    - cron: "19 0 * * *"   # 매일 09:10 KST (UTC 00:10)
+    - cron: "19 3 * * *"   # 매일 09:10 KST (UTC 00:10)
 
 jobs:
   run:
