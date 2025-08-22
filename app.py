@@ -392,19 +392,50 @@ def line_move(name_link: str, prev_rank: Optional[int], curr_rank: Optional[int]
     else:           return f"- {name_link} {prev_rank}위 → {curr_rank}위 (변동없음)", 0
 
 def build_sections(df_today: pd.DataFrame, df_prev: Optional[pd.DataFrame]) -> Dict[str, List[str]]:
+    """
+    - TOP10: 전일 대비 (↑n)/(↓n)/(-)/(new) 배지 표시
+    - 급상승/급하락: Top100 전체, 변동 10계단 이상, 각 5개
+    - OUT: 전일 1~70 → 오늘 OUT, 최대 5개 (전일 순위 오름차순)
+    - 뉴랭커: Top30 신규 진입, 최대 3개
+    """
     S = {"top10": [], "rising": [], "newcomers": [], "falling": [], "outs": [], "inout_count": 0}
 
-    # TOP10 (브랜드 포함)
+    # ---------- 전일 rank 맵 (url 기준) ----------
+    prev_rank_map: Dict[str, int] = {}
+    if df_prev is not None and len(df_prev):
+        df_p = df_prev.copy()
+        df_p = df_p[(df_p["rank"].notna()) & (df_p["rank"] <= 100)]
+        for _, r in df_p.iterrows():
+            try:
+                prev_rank_map[str(r["url"]).strip()] = int(r["rank"])
+            except:
+                pass
+
+    # ---------- TOP10 (등락 배지 포함) ----------
     top10 = df_today.dropna(subset=["rank"]).sort_values("rank").head(10)
     for _, r in top10.iterrows():
-        disp = make_display_name(r.get("brand",""), r["product_name"], include_brand=True)
-        name_link = f"<{r['url']}|{slack_escape(disp)}>"
-        price_txt = fmt_currency_usd(r["price"])
-        dc = r.get("discount_percent"); tail = f" (↓{int(dc)}%)" if pd.notnull(dc) else ""
-        S["top10"].append(f"{int(r['rank'])}. {name_link} — {price_txt}{tail}")
+        cur = int(r["rank"])
+        key = str(r["url"]).strip()
+        prev = prev_rank_map.get(key)  # 없으면 None → new
 
-    # 전일 CSV 없으면 비교 섹션 생략
-    if df_prev is None or not len(df_prev):
+        if prev is None:
+            badge = "(new)"
+        elif prev > cur:
+            badge = f"(↑{prev - cur})"
+        elif prev < cur:
+            badge = f"(↓{cur - prev})"
+        else:
+            badge = "(-)"
+
+        disp = make_display_name(r.get("brand", ""), r["product_name"], include_brand=True)
+        name_link = f"<{r['url']}|{slack_escape(disp)}>"
+        price_txt = fmt_currency_usd(r.get("price"))
+        dc = r.get("discount_percent")
+        tail = f" (↓{int(dc)}%)" if pd.notnull(dc) else ""
+        S["top10"].append(f"{cur}. {badge} {name_link} — {price_txt}{tail}")
+
+    # 전일 데이터 없으면 여기까지만
+    if not prev_rank_map:
         return S
 
     # ---------- Top100 전체 비교 ----------
@@ -427,48 +458,45 @@ def build_sections(df_today: pd.DataFrame, df_prev: Optional[pd.DataFrame]) -> D
     # 🔥 급상승 (Top100, +10계단 이상, 최대 5)
     rising = []
     for k in common_all:
-        prev_rank = int(df_p.loc[k, "rank"])
-        curr_rank = int(df_t.loc[k, "rank"])
-        imp = prev_rank - curr_rank
+        pr, cr = int(df_p.loc[k, "rank"]), int(df_t.loc[k, "rank"])
+        imp = pr - cr
         if imp >= 10:
-            line, _ = line_move(full_name_link(df_t.loc[k]), prev_rank, curr_rank)
-            rising.append((imp, curr_rank, prev_rank, slack_escape(df_t.loc[k].get("product_name","")), line))
+            line, _ = line_move(full_name_link(df_t.loc[k]), pr, cr)
+            rising.append((imp, cr, pr, slack_escape(df_t.loc[k].get("product_name","")), line))
     rising.sort(key=lambda x: (-x[0], x[1], x[2], x[3]))
     S["rising"] = [e[-1] for e in rising[:5]]
 
-    # 🆕 뉴랭커 (Top30 신규 진입, 최대 3) — 그대로 유지
+    # 🆕 뉴랭커 (Top30 신규 진입, 최대 3)
     t30 = df_t[df_t["rank"] <= 30].copy()
     p30 = df_p[df_p["rank"] <= 30].copy()
     newcomers = []
     for k in (set(t30.index) - set(p30.index)):
-        curr_rank = int(t30.loc[k, "rank"])
-        newcomers.append((curr_rank, f"- {full_name_link(t30.loc[k])} NEW → {curr_rank}위"))
+        cr = int(t30.loc[k, "rank"])
+        newcomers.append((cr, f"- {full_name_link(t30.loc[k])} NEW → {cr}위"))
     newcomers.sort(key=lambda x: x[0])
-    S["newcomers"] = [line for _, line in newcomers[:3]]
+    S["newcomers"] = [ln for _, ln in newcomers[:3]]
 
     # 📉 급하락 (Top100, -10계단 이상, 최대 5)
     falling = []
     for k in common_all:
-        prev_rank = int(df_p.loc[k, "rank"])
-        curr_rank = int(df_t.loc[k, "rank"])
-        drop = curr_rank - prev_rank
+        pr, cr = int(df_p.loc[k, "rank"]), int(df_t.loc[k, "rank"])
+        drop = cr - pr
         if drop >= 10:
-            line, _ = line_move(full_name_link(df_t.loc[k]), prev_rank, curr_rank)
-            falling.append((drop, curr_rank, prev_rank, slack_escape(df_t.loc[k].get("product_name","")), line))
+            line, _ = line_move(full_name_link(df_t.loc[k]), pr, cr)
+            falling.append((drop, cr, pr, slack_escape(df_t.loc[k].get("product_name","")), line))
     falling.sort(key=lambda x: (-x[0], x[1], x[2], x[3]))
     S["falling"] = [e[-1] for e in falling[:5]]
 
-    # ❌ OUT (전일 1~70 → 오늘 OUT, 최대 5 / 전일 순위 오름차순)
+    # ❌ OUT (전일 1~70 → OUT, 최대 5 / 전일 순위 오름차순)
     outs = []
     for k in out_all:
-        prev_rank = int(df_p.loc[k, "rank"])
-        if prev_rank <= 70:
-            line, _ = line_move(full_name_link(df_p.loc[k]), prev_rank, None)
-            outs.append((prev_rank, line))
+        pr = int(df_p.loc[k, "rank"])
+        if pr <= 70:
+            line, _ = line_move(full_name_link(df_p.loc[k]), pr, None)
+            outs.append((pr, line))
     outs.sort(key=lambda x: x[0])
     S["outs"] = [ln for _, ln in outs[:5]]
 
-    # 인&아웃 개수(Top100 기준)
     S["inout_count"] = len(new_all) + len(out_all)
     return S
 
