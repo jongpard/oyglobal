@@ -407,57 +407,71 @@ def build_sections(df_today: pd.DataFrame, df_prev: Optional[pd.DataFrame]) -> D
     if df_prev is None or not len(df_prev):
         return S
 
-    df_t = df_today.copy(); df_t["key"] = df_t["url"]; df_t.set_index("key", inplace=True)
-    df_p = df_prev.copy(); df_p["key"] = df_p["url"]; df_p.set_index("key", inplace=True)
+    # ---------- Top100 전체 비교 ----------
+    df_t = df_today.copy()
+    df_t = df_t[(df_t["rank"].notna()) & (df_t["rank"] <= 100)].copy()
+    df_t["key"] = df_t["url"]; df_t.set_index("key", inplace=True)
 
-    t30 = df_t[(df_t["rank"].notna()) & (df_t["rank"] <= 30)].copy()
-    p30 = df_p[(df_p["rank"].notna()) & (df_p["rank"] <= 30)].copy()
-    common = set(t30.index) & set(p30.index)
-    new    = set(t30.index) - set(p30.index)
-    out    = set(p30.index) - set(t30.index)
+    df_p = df_prev.copy()
+    df_p = df_p[(df_p["rank"].notna()) & (df_p["rank"] <= 100)].copy()
+    df_p["key"] = df_p["url"]; df_p.set_index("key", inplace=True)
+
+    common_all = set(df_t.index) & set(df_p.index)
+    new_all    = set(df_t.index) - set(df_p.index)
+    out_all    = set(df_p.index) - set(df_t.index)
 
     def full_name_link(row):
         disp = make_display_name(row.get("brand",""), row.get("product_name",""), include_brand=True)
         return f"<{row['url']}|{slack_escape(disp)}>"
 
-    # 🔥 급상승 (상위 3)
+    # 🔥 급상승 (Top100, +10계단 이상, 최대 5)
     rising = []
-    for k in common:
-        prev_rank = int(p30.loc[k,"rank"]); curr_rank = int(t30.loc[k,"rank"])
+    for k in common_all:
+        prev_rank = int(df_p.loc[k, "rank"])
+        curr_rank = int(df_t.loc[k, "rank"])
         imp = prev_rank - curr_rank
-        if imp > 0:
-            line,_ = line_move(full_name_link(t30.loc[k]), prev_rank, curr_rank)
-            rising.append((imp, curr_rank, prev_rank, slack_escape(t30.loc[k].get("product_name","")), line))
+        if imp >= 10:
+            line, _ = line_move(full_name_link(df_t.loc[k]), prev_rank, curr_rank)
+            rising.append((imp, curr_rank, prev_rank, slack_escape(df_t.loc[k].get("product_name","")), line))
     rising.sort(key=lambda x: (-x[0], x[1], x[2], x[3]))
-    S["rising"] = [e[-1] for e in rising[:3]]
+    S["rising"] = [e[-1] for e in rising[:5]]
 
-    # 🆕 뉴랭커 (≤3)
+    # 🆕 뉴랭커 (Top30 신규 진입, 최대 3) — 그대로 유지
+    t30 = df_t[df_t["rank"] <= 30].copy()
+    p30 = df_p[df_p["rank"] <= 30].copy()
     newcomers = []
-    for k in new:
-        curr_rank = int(t30.loc[k,"rank"])
+    for k in (set(t30.index) - set(p30.index)):
+        curr_rank = int(t30.loc[k, "rank"])
         newcomers.append((curr_rank, f"- {full_name_link(t30.loc[k])} NEW → {curr_rank}위"))
     newcomers.sort(key=lambda x: x[0])
     S["newcomers"] = [line for _, line in newcomers[:3]]
 
-    # 📉 급하락 (상위 5)
+    # 📉 급하락 (Top100, -10계단 이상, 최대 5)
     falling = []
-    for k in common:
-        prev_rank = int(p30.loc[k,"rank"]); curr_rank = int(t30.loc[k,"rank"])
+    for k in common_all:
+        prev_rank = int(df_p.loc[k, "rank"])
+        curr_rank = int(df_t.loc[k, "rank"])
         drop = curr_rank - prev_rank
-        if drop > 0:
-            line,_ = line_move(full_name_link(t30.loc[k]), prev_rank, curr_rank)
-            falling.append((drop, curr_rank, prev_rank, slack_escape(t30.loc[k].get("product_name","")), line))
+        if drop >= 10:
+            line, _ = line_move(full_name_link(df_t.loc[k]), prev_rank, curr_rank)
+            falling.append((drop, curr_rank, prev_rank, slack_escape(df_t.loc[k].get("product_name","")), line))
     falling.sort(key=lambda x: (-x[0], x[1], x[2], x[3]))
     S["falling"] = [e[-1] for e in falling[:5]]
 
-    # OUT (급하락 섹션 아래)
-    for k in sorted(list(out)):
-        prev_rank = int(p30.loc[k,"rank"])
-        line,_ = line_move(full_name_link(p30.loc[k]), prev_rank, None)
-        S["outs"].append(line)
+    # ❌ OUT (전일 1~70 → 오늘 OUT, 최대 5 / 전일 순위 오름차순)
+    outs = []
+    for k in out_all:
+        prev_rank = int(df_p.loc[k, "rank"])
+        if prev_rank <= 70:
+            line, _ = line_move(full_name_link(df_p.loc[k]), prev_rank, None)
+            outs.append((prev_rank, line))
+    outs.sort(key=lambda x: x[0])
+    S["outs"] = [ln for _, ln in outs[:5]]
 
-    S["inout_count"] = len(new) + len(out)
+    # 인&아웃 개수(Top100 기준)
+    S["inout_count"] = len(new_all) + len(out_all)
     return S
+
 
 def build_slack_message(date_str: str, S: Dict[str, List[str]]) -> str:
     lines: List[str] = []
