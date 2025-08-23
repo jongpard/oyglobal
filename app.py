@@ -4,7 +4,7 @@
 - 소스: https://global.oliveyoung.com/display/page/best-seller?target=pillsTab1Nav1
 - HTTP(정적) → 부족 시 Playwright(동적) 폴백
 - 파일명: 올리브영글로벌_랭킹_YYYY-MM-DD.csv (KST)
-- 전일 CSV 비교 Top30 → Slack 알림
+- 전일 CSV 비교 Top100 → Slack 알림
 
 필요 환경변수:
   SLACK_WEBHOOK_URL
@@ -349,9 +349,10 @@ def drive_upload_csv(service, folder_id: str, name: str, df: pd.DataFrame) -> st
 
 def drive_download_csv(service, folder_id: str, name: str) -> Optional[pd.DataFrame]:
     from googleapiclient.http import MediaIoBaseDownload
-    res = service.files().list(q=f"name = '{name}' and '{folder_id}' in parents and trashed = false",
-                               fields="files(id,name)", supportsAllDrives=True,
-                               includeItemsFromAllDrives=True).execute()
+    res = service.files().list(
+        q=f"name = '{name}' and '{folder_id}' in parents and trashed = false",
+        fields="files(id,name)", supportsAllDrives=True, includeItemsFromAllDrives=True
+    ).execute()
     files = res.get("files", [])
     if not files: return None
     fid = files[0]["id"]
@@ -497,7 +498,11 @@ def build_sections(df_today: pd.DataFrame, df_prev: Optional[pd.DataFrame]) -> D
     outs.sort(key=lambda x: x[0])
     S["outs"] = [ln for _, ln in outs[:5]]
 
-    S["inout_count"] = len(new_all) + len(out_all)
+    # ✅ 인&아웃: Top100 URL 키의 대칭차집합 크기 / 2
+    today_top_keys = set(df_t.index)
+    prev_top_keys  = set(df_p.index)
+    S["inout_count"] = len(today_top_keys ^ prev_top_keys) // 2
+
     return S
 
 
