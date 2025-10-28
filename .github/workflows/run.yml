@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   schedule:
     # KST 08:20 ≒ UTC 23:20
-    - cron: "20 23 * * *"
+    - cron: "17 3 * * *"
 
 env:
   PYTHONUTF8: "1"
